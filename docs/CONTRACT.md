@@ -1109,4 +1109,42 @@ not become a peephole. A static token is estate-scoped by construction (it alrea
 every row) and may name any address, which is what an operator or door read needs. A
 malformed address is `E_VALIDATION_ERROR`, never a silently-dropped parameter.
 
+**Role queues (#404, opt-in, per_account only).** A role address belongs to a FUNCTION,
+so under per-account scoping it is nobody viewer address and its mail is delivered,
+stored, searchable and visible in NO view. Ruling (2026-07-25): role mail gets its OWN
+folder per role address, never merged into a personal INBOX. The door gained
+`POSTERN_IMAP_VIEWER_ROLES` (`role=member+member`, full addresses both sides), which
+makes a viewer resolve to a SET of addresses: V plus every role V is a member of.
+`POSTERN_IMAP_VIEWER_MAP` stays 1:1 and membership is keyed on the RESOLVED address, so
+the two compose by construction (login -> V, then roles(V)).
+
+- **Folder shape:** each role publishes as `Roles/<local part>` under a `\Noselect`
+  `Roles` parent, in the existing personal namespace (delimiter `/`). Role folder names
+  are new, so introducing them needs no UIDVALIDITY bump; repointing an existing name at
+  a different address does.
+- **Predicate:** `to=<role address>` with `lens=inbox` -- the same named
+  viewer-relative view INBOX uses, applied to the role. It sends the LENS, never
+  `direction=inbound`: since #403 `direction` is the stored wire fact, so filtering
+  on it would drop same-domain sends delivered to the queue, and a reply sent AS the
+  role stays out of the view (`from = R`). INBOX keeps `to=V`, so the personal and
+  queue views never merge.
+- **Read state stays per MEMBER, not per queue:** a role read passes `seenFor=V` (the
+  projection key defined above) and a `\Seen` STORE writes `for=V`. Without it the
+  queue view would render `messages.seen`, i.e. QUEUE state, making "Ada read it"
+  indistinguishable from "the queue is handled" -- a shared-queue workflow this
+  contract does NOT model yet. The door reads with a static, estate-scoped service
+  token, which is the caller class allowed to name an address other than itself.
+- **Write posture:** read plus `\Seen` only. APPEND, COPY/MOVE, EXPUNGE, `\Flagged`
+  and `\Answered` on a role folder are refused (tagged NO): each would write
+  estate-wide state on behalf of every other member of the queue.
+- **Fail-closed:** a malformed, duplicated, self-referential or name-colliding role map
+  is a startup error; roles outside `per_account` are a startup error; a login with no
+  derivable V serves nothing, roles included. A non-member never sees the folder and
+  cannot SELECT it.
+- **Interaction with 10.2b:** `FILE_ALSO_UNDER` adds an owner to the DELIVERED SET at
+  ingest, so a deployment running both shows role mail in the owner INBOX as well as the
+  role folder. Once a role has a folder, drop it from `FILE_ALSO_UNDER`.
+- **Webmail** scopes to the bound session identity and does not model role membership
+  yet; parity is tracked separately.
+
 `/api/folders` unread counts (#352) MUST use effective seen when they land.
