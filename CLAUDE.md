@@ -108,6 +108,11 @@ first (it is not part of any test run).
 (`v*`), never on a merge. **A bare merge to `main` does NOT redeploy production** -- it runs CI only.
 Ship with `git tag -a vX.Y.Z -m ... && git push origin vX.Y.Z`; the workflow applies
 `wrangler d1 migrations apply` first, then `wrangler deploy`, so a schema change ships with its code.
+**The tag gates EXPECT the version pins already on `main`** (v1.0.5 shipped deploy-only because
+they were not): a `## vX.Y.Z` section in `CHANGELOG.md`, `clients/python/pyproject.toml`
+`version`, `postern_client/__init__.py` `__version__`, and `inbound/package.json` `version` --
+land the release PR with all four, THEN cut the tag. (`mcp/package.json` versions on its own
+`postern-mcp-v*` track.)
 `workflow_dispatch` may run the gate, but the deploy step is guarded on a tag ref, so a manual
 dispatch from a branch never ships prod. Public repo -> GitHub-hosted `ubuntu-latest`.
 

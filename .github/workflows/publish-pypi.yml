@@ -50,7 +50,14 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
           if [ "$tag" != "$pkg" ]; then
-            echo "Tag v$tag does not match pyproject.toml version $pkg" >&2
+            echo "::error::Tag v$tag does not match pyproject.toml version $pkg" >&2
+            exit 1
+          fi
+          # Third member of the lockstep (v1.1.0 gate extension): __version__ drifted
+          # to 1.0.4 while 1.0.6 published, and nothing could catch it.
+          dunder="$(python -c "import re; print(re.search(r'__version__ = \"([^\"]+)\"', open('postern_client/__init__.py').read()).group(1))")"
+          if [ "$tag" != "$dunder" ]; then
+            echo "::error::Tag v$tag does not match postern_client.__version__ $dunder" >&2
             exit 1
           fi
 
