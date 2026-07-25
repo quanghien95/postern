@@ -5,6 +5,60 @@ Core v1.0 mailbox (M1 contract). Newest first. This tracks the inbound Worker +
 `postern-client` release train; `@skyphusion/postern-mcp` (`mcp/`) tags and
 versions on its own npm publish cadence and does not get an entry here by convention.
 
+## v1.1.0
+
+The 2026-07-25/26 evaluation sprint: a full up-to-par audit of the repo (docs, security,
+components, CI/release) plus the fixes it demanded. MINOR because real capability shipped:
+named viewer lenses, role-address folders, per-reader seen rendering, and webmail login
+hardening. Migration `0014` ships with this tag (additive, auto-applied).
+
+- **inbound:** `direction` now filters the STORED wire fact exactly, on both read endpoints and
+  in every search mode; the viewer-relative views are NAMED lenses instead (`lens=inbox|sent`,
+  needs a viewer, not combinable with `direction`) (#403, the read-back defects). Before this, a
+  caller asking "did anything arrive for X" could get X's own sent copy back under
+  `direction=inbound`. The #350 INBOX view is unchanged, it just has its name now.
+- **inbound:** `fts` search joins tokens with AND, so ABSENCE is representable: a marker string
+  that exists nowhere returns an empty set instead of every message sharing one of its words
+  (#403). `/api/messages` also now REFUSES an invalid `direction` instead of silently ignoring it.
+- **inbound:** `seenFor=` on `GET /api/messages` + `/api/search` renders a chosen reader's
+  per-recipient seen state independent of the row predicate (#404's enabling half). A bound
+  session may only name itself; absent, byte-identical to before.
+- **imap:** role addresses get their OWN folders (#404): `POSTERN_IMAP_VIEWER_ROLES` maps
+  `role@dom=member@dom+member@dom`; members see `Roles/<localpart>` under a `\Noselect` parent,
+  INBOX stays personal, read state stays per member (never "the queue is handled"), every
+  non-read write refuses honestly. per_account mode only; estate default byte-identical.
+  Fail-closed on malformed config, non-members, and underivable viewers.
+- **inbound (webmail sessions):** the durable brute-force lockout deferred from #351 finally
+  shipped (#409): per-account + per-client-IP counters in D1 (migration `0014`), backoff with
+  `429` + `Retry-After`, fail-closed `503` when the counter store is unreachable, enumeration
+  posture preserved. Plus: the mint path now enforces the repo body cap (`413`) and refuses
+  cross-site mints (login CSRF). All still dark unless `WEBMAIL_AUTH_BACKEND=native`.
+- **inbound (webmail):** marking a message read in a session no longer flips row-level seen
+  estate-wide or clobbers other recipients' read state (#410): the session identity is bound as
+  the seen viewer, a mismatched `for` is refused, and the message-access gate applies. Bearer
+  token callers (the IMAP door) are byte-identical. The message iframe also carries its own CSP
+  now, so the sandbox attribute is not a single point of failure.
+- **mcp (own tag, noted here for the record):** `mailbox_reply` finally carries `attachments`,
+  `mode` (`reply`/`replyAll`) and `quote_original` (the worker accepted all three since #363; the
+  tool schema said otherwise); `mailbox_list`/`mailbox_search` gained `lens`, and search echoes
+  `mode`/`viewer`/`lens`. Published as **postern-mcp 1.3.0** (`postern-mcp-v1.3.0`).
+- **python:** `postern-client` gains `lens` on list (`--lens` in the CLI); version 1.1.0
+  (lockstep with this tag), and `__version__` is synced (it had drifted to 1.0.4 while 1.0.6
+  published; the publish gate now asserts it too).
+- **deps:** postcss bumped past GHSA-r28c-9q8g-f849 in `mcp/` (#431; Dependabot alert 19).
+- **docs:** the evaluation's 22-finding docs sweep (#412): DEPLOY/README no longer claim
+  merge-deploys (tag-gated is the truth), the quickstart's seed step no longer hard-errors on a
+  fresh install, OPERATIONS backup covers ALL tables (it silently lost drafts, placement,
+  per-recipient seen, and UID counters), IMAP-APPLE-MAIL reflects durable Drafts/Trash, and the
+  scoped-token slots are documented in DEPLOY. `docs/AUTH-CONTRACT.md` is rewritten as the
+  PORTABLE one-login contract (#424); the operator-specific record moved to the operators'
+  private infrastructure repository, same route as the deploy runbooks.
+- **evaluation intake (filed, not fixed here):** #413-#420 track the remaining findings --
+  python-client API parity, relay 403 bounce mapping, MCP surface rot, IMAP door error
+  passthrough + reactor blocking, cross-seam contract tests, tag-workflow preflight, npm audit
+  gates + coverage floors, adversarial-audit hardening. #422, #425, #427, #429 are adjacent
+  findings from the sprint's own lanes.
+
 ## v1.0.6
 
 Role-address filing correctness, and the release pins v1.0.5 shipped without.
@@ -25,7 +79,10 @@ Role-address filing correctness, and the release pins v1.0.5 shipped without.
 
 ## v1.0.5
 
-Worker deploy only. The inbound Worker shipped; the PyPI and GitHub-release legs did NOT run,
+Worker deploy only -- **corrected 2026-07-26: run-level evidence shows both door images ALSO
+built and dispatch-rolled on this tag** (imap-image run 30162386466, relay-image run
+30162386461), so what shipped was the worker plus both door images; no GitHub Release and no
+PyPI artifact. The inbound Worker shipped; the PyPI and GitHub-release legs did NOT run,
 because the tag was cut without bumping `clients/python/pyproject.toml` or adding a CHANGELOG
 section (both are version-lockstep gates). Recorded rather than quietly re-tagged; v1.0.6 carries
 the pins.

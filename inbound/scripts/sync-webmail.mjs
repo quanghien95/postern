@@ -26,7 +26,7 @@ function escapeForTemplateLiteral(text) {
 
 const embedded = escapeForTemplateLiteral(html);
 
-const header = `// Self-contained read-only Postern webmail (the human browser door, complementing
+const header = `// Self-contained Postern webmail (the human browser door, complementing
 // the IMAP proxy). A single vanilla HTML/CSS/JS page, no framework and no build
 // step. It is a CLIENT of the read API (#24): the operator supplies the API
 // origin + their Postern API token in the browser; the token lives in
