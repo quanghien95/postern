@@ -17,6 +17,13 @@ describe("READ_TOOLS surface", () => {
 });
 
 describe("mailbox_search", () => {
+  it("declares from, mailbox, after, before, hasAttachment, and seen on its input schema (#419 sync)", () => {
+    const keys = Object.keys(tool("mailbox_search").inputSchema);
+    for (const k of ["from", "mailbox", "after", "before", "hasAttachment", "seen"]) {
+      expect(keys).toContain(k);
+    }
+  });
+
   it("defaults mode to hybrid and forwards query + direction to client.search", async () => {
     const client: any = { search: vi.fn().mockResolvedValue({ items: [{ message: { messageId: "m1" } }], cursor: null }) };
     const out: any = await tool("mailbox_search").handler(client, { query: "invoice", direction: "outbound" });
@@ -31,15 +38,70 @@ describe("mailbox_search", () => {
     await tool("mailbox_search").handler(client, { query: "x", mode: "fts" });
     expect(client.search).toHaveBeenCalledWith(expect.objectContaining({ mode: "fts" }));
   });
+
+  it("forwards from, mailbox, after, before, hasAttachment, and seen to client.search (#419 sync)", async () => {
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_search").handler(client, {
+      query: "invoice",
+      from: "a@b.com",
+      mailbox: "archive",
+      after: "2026-01-01",
+      before: "2026-02-01",
+      hasAttachment: true,
+      seen: false,
+    });
+    expect(client.search).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: "a@b.com",
+        mailbox: "archive",
+        after: "2026-01-01",
+        before: "2026-02-01",
+        hasAttachment: true,
+        seen: false,
+      }),
+    );
+    expect(out.mailbox).toBe("archive");
+    expect(out.seen).toBe(false);
+  });
+
+  it("declares and forwards seenFor, the read-state projection key (#453)", async () => {
+    expect(Object.keys(tool("mailbox_search").inputSchema)).toContain("seenFor");
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_search").handler(client, { query: "x", seenFor: "ada@example.com" });
+    expect(client.search).toHaveBeenCalledWith(expect.objectContaining({ seenFor: "ada@example.com" }));
+    expect(out.seenFor).toBe("ada@example.com");
+  });
 });
 
 describe("mailbox_list", () => {
+  it("declares mailbox on its input schema (#419 sync)", () => {
+    expect(Object.keys(tool("mailbox_list").inputSchema)).toContain("mailbox");
+  });
+
   it("maps filters to client.list", async () => {
     const client: any = { list: vi.fn().mockResolvedValue({ items: [{ messageId: "m2" }], cursor: "c" }) };
     const out: any = await tool("mailbox_list").handler(client, { direction: "inbound", to: "x@y.com" });
     expect(client.list).toHaveBeenCalledWith(expect.objectContaining({ direction: "inbound", to: "x@y.com" }));
     expect(out.count).toBe(1);
     expect(out.cursor).toBe("c");
+  });
+
+  it("forwards mailbox to client.list (#419 sync)", async () => {
+    const client: any = { list: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    await tool("mailbox_list").handler(client, { mailbox: "junk" });
+    expect(client.list).toHaveBeenCalledWith(expect.objectContaining({ mailbox: "junk" }));
+  });
+
+  it("declares and forwards seenFor, the read-state projection key (#453)", async () => {
+    expect(Object.keys(tool("mailbox_list").inputSchema)).toContain("seenFor");
+    const client: any = { list: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_list").handler(client, {
+      to: "abuse@example.com",
+      lens: "inbox",
+      seenFor: "ada@example.com",
+    });
+    expect(client.list).toHaveBeenCalledWith(expect.objectContaining({ seenFor: "ada@example.com" }));
+    expect(out.seenFor).toBe("ada@example.com");
   });
 });
 

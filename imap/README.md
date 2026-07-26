@@ -155,6 +155,8 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_VIEWER_MAP` | no | -- | optional `login=addr,login2=addr2` overrides for directories where the login id is NOT the mail local part (e.g. `crockenhaus=conrad@example.org`). An override wins over the rule |
 | `POSTERN_IMAP_VIEWER_ROLES` | no | -- | role-address membership, `role=member+member,role2=member` (full addresses both sides). Each role publishes as its OWN folder `Roles/<local part>` for its members (#404). `per_account` only; any malformed or ambiguous entry is a startup failure |
 
+**`POSTERN_IMAP_VIEWER_ROLES` mirrors the Worker's `POSTERN_VIEWER_ROLES`** (#437, the webmail half of the #404 ruling): same syntax and the same refusal set, so a config one door refuses to start on is refused by the other too. Configure both with the SAME value, and **deploy the worker first** -- the door reads its own env at startup (a network fetch in front of a fail-closed startup would let one flake read as "nobody is on any queue"), so the two are diffable, not shared. `GET /api/roles` returns the worker's parsed map for exactly that diff.
+
 ### Per-account view scoping (#357)
 
 By default (`estate`) the door is one shared mailbox: every login sees the whole
@@ -318,6 +320,49 @@ without Twisted:
 | `account.py` | yes | `IAccount`: the special-use mailbox set (INBOX/Sent/All + empty Drafts/Trash/Junk/Archive), Sent/Drafts APPEND no-op |
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
+
+## Concurrency (#416, #457)
+
+Worker calls run in the reactor threadpool, not on the reactor thread. Before this, one
+slow worker call stalled EVERY connected client for the duration of the call, and
+`api_timeout` defaults to 15s, so the worst case was a fifteen-second freeze of the whole
+door. Numbers, method and the re-runnable scripts: `imap/bench/`.
+
+- `threaded.py` holds the two Twisted-facing shells (`ThreadedAccount`, `ThreadedMailbox`).
+  They are installed ONCE, in the realm; the account and mailbox stay plain synchronous
+  objects that their own suites drive directly.
+- Only the seams Twisted invokes through `maybeDeferred` can answer with a Deferred
+  (select, listMailboxes, requestStatus, fetch, search, store, expunge, addMessage,
+  authenticateLogin). The synchronous IMailbox accessors cannot, so `select` PRELOADS the
+  mailbox inside the pool and they become memory reads.
+- The transport keeps one keep-alive connection PER THREAD (`threading.local`). Sharing
+  one connection across threads corrupts it; a mutex would have serialized every door
+  call behind the slowest one. Both measured.
+- The pool is bounded by the reactor threadpool default (10 threads), so a hung worker
+  consumes at most ten threads.
+- FETCH rendering was the last thing left on the reactor thread, and #457 closed it.
+  Twisted renders a FETCH by calling `IMessage` accessors straight from the protocol,
+  with no Deferred seam, so a body hydration inside it froze the door once per rendered
+  message: a `FETCH 1:10` against a 200ms worker froze every other client for 2405ms of
+  a 2399ms command, in ten separate stalls. `do_FETCH` now PRE-RUNS the accessor reads
+  the render is about to make (`fetchwarm.fetch_reads` -> `PosternIMAPMessage.prehydrate`)
+  inside the pool, so the render reads memory. Twisted's rendering path is untouched.
+- Lazy hydration is preserved, not traded away. The warm derives its reads from the
+  query and each message applies its OWN summary-versus-body rules to them, so a scan
+  still fetches no body (#102) and `BODY[i]` still pulls one attachment, not all of them
+  (#342). A query needing nothing from the worker (`FETCH UID FLAGS`) produces no reads
+  and skips the pool hop entirely.
+- The warm is invisible by construction: it can move where a wait happens, never what a
+  FETCH answers. It swallows its own failures, and hydration errors are MEMOIZED on the
+  message, so the render re-raises the identical error without a second worker call.
+- The warm for one FETCH runs SERIALLY in ONE pool thread, for the whole message range,
+  rather than fanning each message out across the pool. Deliberate: fanning out would
+  make a single client fetching a large range consume most of the ten available threads
+  and starve everyone else, which is the fairness problem #416 set out to fix, moved one
+  level down. A client still waits for its own fetch, and only for its own.
+- `test_reactor_nonblocking.py` asserts ZERO reactor-thread worker calls across every
+  FETCH shape a real client sends, and pins #102 and #342 alongside, so a warm that
+  bought its speed by over-fetching fails too.
 
 ## Tests
 

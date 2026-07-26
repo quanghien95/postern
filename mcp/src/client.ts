@@ -6,6 +6,7 @@
 
 import type {
   Direction,
+  MailboxFilter,
   Message,
   MessageSummary,
   Page,
@@ -55,7 +56,14 @@ export class PosternClient {
     cursor?: string;
     direction?: Direction;
     to?: string;
+    from?: string;
     lens?: ViewLens;
+    mailbox?: MailboxFilter;
+    after?: string;
+    before?: string;
+    hasAttachment?: boolean;
+    seen?: boolean;
+    seenFor?: string;
   }): Promise<Page<SearchHit>> {
     const params: Record<string, string> = { q: args.q };
     if (args.mode) params.mode = args.mode;
@@ -73,6 +81,25 @@ export class PosternClient {
     // combination is a clean 400 here, never a quietly different answer.
     if (args.to) params.to = args.to;
     if (args.lens) params.lens = args.lens;
+    // Sender filter (worker #366, api.ts): same lower(from_addr) LIKE semantics as
+    // list's from=.
+    if (args.from) params.from = args.from;
+    // Durable-folder scope (worker #352/#354, api.ts): "all" = every placement,
+    // archive|trash|junk = that placement only.
+    if (args.mailbox) params.mailbox = args.mailbox;
+    // Inclusive ISO date bounds on messages.date (worker #354).
+    if (args.after) params.after = args.after;
+    if (args.before) params.before = args.before;
+    // Booleans forward as "true"/"false"; the worker accepts 0|1|true|false
+    // (worker #354, api.ts) and 400s anything else.
+    if (args.hasAttachment !== undefined) params.hasAttachment = String(args.hasAttachment);
+    if (args.seen !== undefined) params.seen = String(args.seen);
+    // Read-state projection key (worker #404): whose message_seen_by row the
+    // effective-seen COALESCE reads, separate from which rows come back. An MCP
+    // token is a static, estate-scoped credential (docs/CONTRACT.md 10.9), the
+    // caller class the worker allows to name any address here, same as python
+    // and the imap door.
+    if (args.seenFor) params.seenFor = args.seenFor;
     const body = await this.requestGet("/api/search", params);
     return { items: (body.items as SearchHit[]) ?? [], cursor: body.cursor ?? null };
   }
@@ -83,9 +110,11 @@ export class PosternClient {
     thread?: string;
     direction?: Direction;
     lens?: ViewLens;
+    mailbox?: MailboxFilter;
     q?: string;
     limit?: number;
     cursor?: string;
+    seenFor?: string;
   }): Promise<Page<MessageSummary>> {
     const params: Record<string, string> = {};
     if (args.to) params.to = args.to;
@@ -93,9 +122,16 @@ export class PosternClient {
     if (args.thread) params.thread = args.thread;
     if (args.direction) params.direction = args.direction;
     if (args.lens) params.lens = args.lens;
+    // Durable-folder scope (worker #352/#354, api.ts parseListQuery): "all" =
+    // every placement, archive|trash|junk = that placement only, omitted =
+    // mailbox IS NULL (today's default, unchanged).
+    if (args.mailbox) params.mailbox = args.mailbox;
     if (args.q) params.q = args.q;
     if (args.limit !== undefined) params.limit = String(args.limit);
     if (args.cursor) params.cursor = args.cursor;
+    // Read-state projection key (worker #404); see the matching comment in
+    // search() above.
+    if (args.seenFor) params.seenFor = args.seenFor;
     const body = await this.requestGet("/api/messages", params);
     return { items: (body.items as MessageSummary[]) ?? [], cursor: body.cursor ?? null };
   }

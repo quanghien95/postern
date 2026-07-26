@@ -36,6 +36,11 @@ import {
   normalizeUsername,
 } from "./smtpcreds";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
+// The route table is DATA (#417): ONE declaration that the scope gate below derives
+// from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
+// be an if-chain further down this file, which is precisely the knowledge every client
+// had to re-derive by reading this source once and then never re-check.
+import { requiredScope, scopeSatisfies, type RouteScope } from "./routes";
 import {
   handleSession,
   resolveSession,
@@ -311,8 +316,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
     // --- read: list / filter ---
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
-      const sessionIdentity =
-        resolution.viaSession && resolution.identity ? resolution.identity.from : undefined;
+      const sessionIdentity = sessionViewer(resolution);
       const role = roleReadScope(env, sessionIdentity, url.searchParams);
       const query = parseListQuery(url, sessionIdentity);
       if (role) applyRoleScope(query, role, sessionIdentity as string);
@@ -337,9 +341,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
 
     if (request.method === "GET" && path === "/api/folders") {
-      // Viewer for unread counts: session-bound identity wins; BYO read tokens
-      // (IMAP / operator) may pass ?to= the same way list/search do (#350/#352).
-      const viewer = resolution.identity?.from ?? url.searchParams.get("to") ?? undefined;
+      // Viewer for unread counts: ANY bound identity wins (a session, or a
+      // per-identity send token), and an unbound BYO read token (IMAP / operator) may
+      // pass ?to= the same way list/search do (#350/#352). The per-identity-token case
+      // is what makes this boundViewer and not sessionViewer; see both helpers.
+      const viewer = boundViewer(resolution) ?? url.searchParams.get("to") ?? undefined;
       // Role queues are enumerated ONLY for a bound session (#425). A static token is
       // estate-scoped already and reads role mail through its own door, so handing it a
       // role rail would add a concept without adding reach. This response is a
@@ -557,7 +563,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       }
       // Viewer-relative view (#403), same rules as /api/messages: refuses an
       // unknown value, refuses lens+direction, refuses a lens with no viewer.
-      const sessionIdentity = resolution.viaSession ? resolution.identity?.from : undefined;
+      const sessionIdentity = sessionViewer(resolution);
       // Role queue (#425): searching INSIDE a role view stays scoped to the queue, with
       // read state still keyed on the member -- the same swap the list route makes, so
       // the two edges cannot drift apart on what a role view is.
@@ -1309,58 +1315,14 @@ function transportAuthorized(request: Request, env: Env): boolean {
 // (one key sends and receives, the back-compat path); `read` and `send` are the
 // per-function hardening that bounds a leaked token's blast radius.
 
-// The scope a route/method demands. `admin` (credential provisioning) is strictly
-// more privileged than send and is satisfied ONLY by a `both` token.
-type RouteScope = "read" | "send" | "delete" | "imap" | "admin";
-
-// Map the method+path to the scope it requires, mirroring the route table in
-// handleApi exactly. Returns null for any path with no API handler, so (once the
-// token itself is valid) it falls through to the same 404 as before.
-function requiredScope(method: string, path: string): RouteScope | null {
-  if (method === "POST" && (path === "/api/send" || path === "/send")) return "send";
-  if (method === "POST" && path === "/api/reply") return "send";
-  // Marking (un)read is a side effect of READING, so it is read-scoped -- the IMAP
-  // proxy (often holding only a read token) must be able to persist \Seen (#seen).
-  if (method === "POST" && path === "/api/messages/seen") return "read";
-  if (method === "POST" && (path === "/api/messages/flags" || path === "/api/messages/move")) return "read";
-  if (path === "/api/drafts" || path.startsWith("/api/drafts/")) return "send";
-  if (path === "/api/imap/drafts" || path.startsWith("/api/imap/drafts/")) return "imap";
-  if (method === "POST" && path === "/api/imap/import") return "imap";
-  if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
-  if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
-  // Reindex/backfill is the most privileged: a new /api/admin/* path is NOT
-  // covered automatically (unknown paths fall through to null), so it is mapped
-  // here explicitly as `admin` -- a read or send token must never reach it (#85).
-  if (method === "POST" && path === "/api/admin/reindex") return "admin";
-  // Reconcile is read-only but reports over the whole estate; gate it `admin` like
-  // reindex so only a both-scoped token can run the audit (#134).
-  if (method === "POST" && path === "/api/admin/reconcile") return "admin";
-  if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
-  if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
-  if (method === "GET" && path === "/api/search") return "read";
-  if (method === "GET" && path === "/api/recipients/recent") return "read";
-  if (method === "GET" && path === "/api/folders") return "read";
-  // The role map is operator config (#425): `both` only, like reindex/reconcile. A read
-  // token reads MAIL; who is on which queue is a deployment fact, not a mailbox view.
-  if (method === "GET" && path === "/api/roles") return "admin";
-  if (method === "GET" && path === "/api/mobileconfig") return "read";
-  // Single message and the /attachments/{i} sub-route both live under here.
-  if (method === "GET" && path.startsWith("/api/messages/")) return "read";
-  if (method === "GET" && path.startsWith("/api/threads/")) return "read";
-  return null;
-}
-
-// A `both` token satisfies every route; a scoped token satisfies only its own
-// kind. `admin` is satisfied solely by `both`: read/send tokens cannot reach the
-// credential-provisioning routes.
-function scopeSatisfies(have: Scope, need: RouteScope): boolean {
-  if (have === "both") return true;
-  if (need === "read") return have === "read";
-  if (need === "send") return have === "send";
-  if (need === "delete") return have === "delete";
-  if (need === "imap") return have === "imap";
-  return false; // admin: only `both`
-}
+// `requiredScope` and `scopeSatisfies` are imported from ./routes above (#417): the
+// route table is the single source and the gate derives from it, so there is no
+// second copy of this mapping that can be wrong. inbound/route-table.test.ts keeps a
+// verbatim copy of the if-chain that used to live here and asserts the derived
+// function still answers identically over every route plus adversarial paths, so the
+// migration is proved faithful and any future edit to the table that would move the
+// AUTH GATE fails against the recorded original. `Scope` still lives in
+// ./sendidentity (the canonical home for the token-resolution types).
 
 // An authenticated resolution: a Bearer token (scope, optional bound identity) OR an
 // ambient webmail session (an explicit capability SET + bound identity + csrf binding).
@@ -1388,6 +1350,37 @@ async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolu
     viaSession: true,
     csrfHash: session.csrfHash,
   };
+}
+
+/** WHOSE mail a read is bound to, when only a SESSION counts (#417).
+ *
+ *  A webmail session is one human in a browser, so the account boundary is theirs and
+ *  a caller-supplied `to=` is a filter INSIDE it (#422). A Bearer token, even one bound
+ *  to a send identity, is NOT treated as a viewer here: token callers (the IMAP door,
+ *  operators, agents) read the estate and say who they mean with `to=`. Used by
+ *  /api/messages and /api/search, which had two spellings of this same expression.
+ */
+function sessionViewer(resolution: AuthResolution): string | undefined {
+  return resolution.viaSession ? resolution.identity?.from : undefined;
+}
+
+/** WHOSE mail a read is bound to, counting ANY bound identity (#417).
+ *
+ *  Wider than sessionViewer by exactly one case: a per-identity send token resolves to
+ *  its own identity here. /api/folders uses this, so its unread counts are scoped to a
+ *  per-identity token automatically, while the same token reading /api/messages gets
+ *  the estate unless it passes `to=`. That difference is REAL and it is behavior that
+ *  shipped; it is named and tested here rather than left implicit in three different
+ *  expressions (the latent-lens-inconsistency finding on #417). It is also currently
+ *  UNREACHABLE, which viewer-binding.test.ts proves rather than assumes: the only
+ *  resolution that is identity-bound without being a session is a per-identity
+ *  registry token, which carries `send` scope and is refused by all three of these
+ *  read routes. Whether folders should narrow to sessionViewer, or list/search widen
+ *  to this, is therefore a semantics decision with no live consequence yet, and
+ *  nothing is changed while it is open.
+ */
+function boundViewer(resolution: AuthResolution): string | undefined {
+  return resolution.identity?.from;
 }
 
 // Authorize a resolution against a required route scope. A session carries an explicit

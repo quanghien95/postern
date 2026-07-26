@@ -32,8 +32,10 @@ from twisted.python.compat import networkString
 
 from .auth import build_portal
 from .config import Config
+from .fetchwarm import fetch_reads
 from .mailbox import MailboxLoadError
 from .proxywrap import wrap_listener_factory
+from .threaded import in_pool
 
 # The three SEARCH keys whose single-term form we can push to the store's substr
 # endpoint (#148). Maps the RFC 3501 search key to the /api/search field selector
@@ -142,6 +144,70 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         # UNIXAddress has no host attribute; None falls back to the shared bucket.
         setattr(creds, "peer_host", getattr(peer, "host", None))
         return self.portal.login(creds, None, imap4.IAccount)
+
+    def do_FETCH(self, tag, messages, query, uid=0):
+        """FETCH with the response body hydrated in the threadpool, not the reactor (#457).
+
+        #416 part 2 moved every worker call off the reactor thread EXCEPT this one.
+        Twisted renders a FETCH by calling IMessage accessors (getHeaders, getBodyFile,
+        getSize, getSubPart) straight from the protocol as it writes the response, and
+        that path has no maybeDeferred seam, so a body hydration inside it froze the
+        whole door for every connected client, once per rendered message, for up to
+        api_timeout each time.
+
+        The fix is a step, not a rewrite of the Twisted FETCH machinery: after mbox.fetch
+        answers and before the messages reach __cbFetch, PRE-RUN the accessor reads the
+        render is about to make (fetchwarm.fetch_reads) inside the pool. Everything
+        memoizes, so the render then reads memory. The Twisted rendering path itself is
+        untouched.
+
+        Lazy hydration is PRESERVED, not traded away (#102): the reads are derived from
+        the query, and each message applies its own summary-versus-body rules to them, so
+        an ENVELOPE or header scan still fetches no body. A query needing nothing from
+        the worker (FETCH UID FLAGS) produces no reads and skips the pool hop entirely.
+        """
+        if not query:
+            return imap4.IMAP4Server.do_FETCH(self, tag, messages, query, uid)
+        self._oldTimeout = self.setTimeout(None)
+        (
+            maybeDeferred(self.mbox.fetch, messages, uid=uid)
+            .addCallback(self._warm_fetch, query)
+            .addCallback(iter)
+            .addCallback(self._IMAP4Server__cbFetch, tag, query, uid)
+            .addErrback(self._IMAP4Server__ebFetch, tag)
+        )
+
+    # dispatchCommand reads the class tuple by state name, not getattr(self, "do_FETCH"),
+    # so the override only takes effect once it is rebound here.
+    select_FETCH = (  # type: ignore[assignment]
+        do_FETCH,
+        imap4.IMAP4Server.arg_seqset,
+        imap4.IMAP4Server.arg_fetchatt,
+    )
+
+    def _warm_fetch(self, results, query):
+        """Pre-run the accessor reads of the render in the pool; pass the messages through.
+
+        Returns the fetch result UNCHANGED. The warm can only move where a wait happens,
+        never what the FETCH answers: PosternIMAPMessage.prehydrate swallows its own
+        failures and the render re-raises them from the memo.
+        """
+        reads = fetch_reads(query)
+        if not reads:
+            return results
+        fetched = list(results)
+        warmable = [
+            msg for _seq, msg in fetched if callable(getattr(msg, "prehydrate", None))
+        ]
+        if not warmable:
+            return fetched
+
+        def warm():
+            for msg in warmable:
+                msg.prehydrate(reads)
+            return fetched
+
+        return in_pool(warm)
 
     def _IMAP4Server__ebAppend(self, failure, tag):  # overrides IMAP4Server.__ebAppend
         if failure.check(imap4.MailboxException):
@@ -332,12 +398,21 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return
         # sent / drafts / placement: select the mailbox object without emitting
         # EXISTS from a cold load in the stock path -- call addMessage directly.
-        mbox = self.account.select(name)
-        if mbox is None:
-            self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
-            return
-        d = maybeDeferred(mbox.addMessage, message, flags or (), date)
-        d.addCallback(lambda _r: self.sendPositiveResponse(tag, b"APPEND complete"))
+        # #416: select now answers with a Deferred (it builds AND preloads in the reactor
+        # threadpool), so the tail chains off it. maybeDeferred keeps a plain synchronous
+        # account working through the identical path, which is what the account-level and
+        # mailbox-level suites drive.
+        def _selected(mbox):
+            if mbox is None:
+                self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
+                return None
+            appended = maybeDeferred(mbox.addMessage, message, flags or (), date)
+            return appended.addCallback(
+                lambda _r: self.sendPositiveResponse(tag, b"APPEND complete")
+            )
+
+        d = maybeDeferred(self.account.select, name)
+        d.addCallback(_selected)
         d.addErrback(self._IMAP4Server__ebAppend, tag)
 
     # Route APPEND through the override in both states it is valid (authenticated +
@@ -405,17 +480,12 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if src is None:
             self.sendNegativeResponse(tag, verb + b" failed: no mailbox selected")
             return
-        try:
-            mover = getattr(src, "soft_move_fetched_messages", None)
-            if callable(mover):
-                removed_seqs = mover(fetched, mailbox, required_direction=required_direction)
-            else:
-                removed_seqs = src.delete_fetched_messages(fetched)
-        except imap4.MailboxException as exc:
-            self.sendNegativeResponse(tag, verb + b" failed: " + networkString(str(exc)))
-        except Exception as exc:
-            self.sendBadResponse(tag, verb + b" failed: " + networkString(str(exc)))
-        else:
+        # #416: the move is a worker call, so it runs in the reactor threadpool and answers
+        # with a Deferred. maybeDeferred keeps a synchronous mailbox working through the
+        # identical path; the success and failure handling is unchanged and simply hangs
+        # off callbacks now, because a try/except cannot catch a failure that has not
+        # happened yet.
+        def _moved(removed_seqs):
             # #352 review: emit untagged EXPUNGE for whichever source rows the
             # move ACTUALLY removed from this view's live snapshot -- for BOTH
             # COPY and MOVE (there is no true dual-membership copy in this
@@ -426,6 +496,23 @@ class PosternIMAP4Server(imap4.IMAP4Server):
                 for seq in removed_seqs:
                     self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
             self.sendPositiveResponse(tag, verb + b" completed")
+
+        def _failed(reason):
+            if reason.check(imap4.MailboxException):
+                self.sendNegativeResponse(
+                    tag, verb + b" failed: " + networkString(str(reason.value))
+                )
+            else:
+                self.sendBadResponse(
+                    tag, verb + b" failed: " + networkString(str(reason.value))
+                )
+
+        mover = getattr(src, "soft_move_fetched_messages", None)
+        if callable(mover):
+            d = maybeDeferred(mover, fetched, mailbox, required_direction=required_direction)
+        else:
+            d = maybeDeferred(src.delete_fetched_messages, fetched)
+        d.addCallbacks(_moved, _failed)
 
     # Back-compat alias for unit tests that call the pre-#352 callback name.
     _cbCopyToTrashDelete = _cbSoftMove
