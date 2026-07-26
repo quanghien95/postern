@@ -11,6 +11,46 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.2
+
+Patch release: message identity kept verbatim, the IMAP door's last blocking read off
+the reactor thread, and a quiet-by-default gate. No schema change, no route change, no
+migration; the imap door changes ride the door image this tag builds.
+
+- **inbound: Message-IDs are stored VERBATIM** (#486, PRs #489 + #491). The 64-char
+  sha256 collapse at ingest is gone; its stated Vectorize rationale was stale (vector
+  ids are hash-derived at any length, the raw id rides only in metadata). The id is now
+  the header the sender sent, `<>`-stripped and trimmed, up to 255 UTF-8 bytes -- the
+  budget guards the R2 attachment key and is counted the way R2 counts it. This
+  preserves the structured GitHub id (`owner/repo/{issues,pull}/N@github.com`) that the
+  old collapse destroyed at an invisible length cliff, and it FIXES THREADING for long
+  ids: `in_reply_to` is stored raw and never matched a hashed parent, so replies forked.
+  One normalizer is shared by both ingest paths (inbound seam and IMAP APPEND import).
+  Rows stored under the pre-fix hash still merge on redelivery via a legacy lookup keyed
+  exactly as the old code keyed it (untrimmed); no backfill, deliberately -- the raw
+  header was never persisted, so there is nothing to backfill from.
+- **imap: the live poll no longer blocks the reactor** (#485, PR #490). The last #416
+  part 2 call site: the store refresh (NOOP and the timed tick) now runs in the reactor
+  threadpool, while the untagged EXISTS push stays on the reactor thread because it
+  writes to the protocol transport. `do_NOOP` chains refresh, then notify, then the
+  tagged OK, so a client still learns about new mail within the NOOP that asked; ticks
+  return their Deferred so a slow refresh delays the next tick instead of stacking; a
+  refresh-vs-refresh lock stops two overlapping reads from double-appending the same
+  arrivals. Both halves are asserted by thread identity over a real socket, with
+  mutation controls.
+- **imap: the door is gated QUIET by default** (#467, PR #488). A real-socket e2e test
+  drives a normal session with both diagnostic levers at their production default and
+  asserts stdout/stderr stay byte-empty and no twisted log event fires from door code --
+  the gate that would have caught the v1.2.0 stray-diagnostics regression (#456). Proved
+  red against that exact seam before it was trusted.
+- **imap: the driven surface is asserted, not assumed** (#468, PR #487). Every IMAP
+  command the door implements is driven through the recording transport with a per-drive
+  control that the worker routes were actually reached, killing vacuous passes.
+- **ci: deploy smoke leg 9 split into its two refusals** (#483, PR #484). The
+  read-scoped token now asserts the scope gate (403) and a separate send-scoped token
+  asserts the identity gate (`E_IDENTITY_REQUIRED`), with a loud SKIP when the optional
+  `POSTERN_SMOKE_SEND_TOKEN` secret is not configured.
+
 ## v1.3.1
 
 Patch release: the sprint-5 fix pair plus an honest deploy gate. No schema change, no
