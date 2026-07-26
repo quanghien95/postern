@@ -11,6 +11,32 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.2.1
+
+Door patch: the v1.2.0 image shipped two defects in the FETCH hot path, both fixed here.
+No schema change; no worker API surface change. The door image roll off this tag is the
+real payload.
+
+- **imap door (#457):** per-message FETCH body hydration ran ON the reactor thread (the
+  one residual #416 part 2 pinned honestly). Measured: a `FETCH 1:10` against a 200ms
+  worker froze every OTHER connected client for 2405ms of a 2399ms command, in ten
+  separate stalls, each able to run to the full `api_timeout` against a dead worker.
+  `do_FETCH` now PRE-RUNS the accessor reads the render is about to make in the
+  threadpool (`fetchwarm.fetch_reads` + `prehydrate`), so the render reads memory:
+  flat zero stalls, with lazy hydration proven preserved (a header scan still fetches
+  no body, `BODY[i]` still pulls one attachment). Bench + method: `imap/bench/` (#463).
+- **imap door (#456 residual):** leftover debug instrumentation (`DEBUG in_pool enter`
+  printed unconditionally to stderr on EVERY worker call, ignoring the opt-in
+  diagnostic levers) is removed (#463).
+- **mcp (own tag, noted here for the record):** `mailbox_search`/`mailbox_list` gained
+  `seenFor`, the last declared worker param the client could not send (#453, #462);
+  ships on the next `postern-mcp-v*` tag.
+- **operator note (no code):** the v1.2.0 deploy's live-smoke leg failed 401 because the
+  smoke read credential had been orphaned by an out-of-band worker-secret re-set the day
+  before (crew-secrets#231); production itself was healthy and verified by API read-back.
+  The credential is re-minted with real escrow, the read set now has a custody roster +
+  re-set procedure, and the smoke leg is expected green on this tag.
+
 ## v1.2.0
 
 The 2026-07-26 intake sprint: all 12 issues filed by the v1.1.0 evaluation (#413-#420, #422,
