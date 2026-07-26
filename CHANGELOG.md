@@ -11,7 +11,13 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.3.0
+
+The single-source-roles release. One BREAKING change with a short operator migration
+(below), plus the first intake wave the v1.2.1 live smoke and the #416 follow-ups
+surfaced: the sent copy now stores its attachments, the two remaining pre-gate routes
+answer a fixed envelope, and the door gets a measured timeout, a worker circuit
+breaker, and a pool-saturation signal.
 
 - **BREAKING (imap door + inbound): role membership is configured ONCE, on the Worker**
   (#438). `POSTERN_IMAP_VIEWER_ROLES` is RETIRED: the door reads the parsed map from the
@@ -35,6 +41,35 @@ mismatched MCP tag fails before it publishes.
   malformed or ambiguous entry, and the door inherits that by construction, adding only
   the structural checks the Worker cannot own (a response it will not build folders from,
   two roles colliding on one folder name), also whole-map.
+- **inbound (#470):** the stored SENT copy now carries its attachments. `dispatchAndStore`
+  always handed the parts to the transport (the recipient got them) but the sent-copy
+  `store.put` carried none, so your own sent attachments were unreadable from your own
+  mailbox (webmail Sent, IMAP Sent, `GET /api/messages/{id}/attachments/{i}`) -- true
+  since outbound attachments shipped in #70, found by the v1.2.1 deploy's first full
+  live-smoke run. The sent copy now stores metadata rows + R2 bytes through the SAME
+  path inbound uses, decoded after dispatch so a maximum-size send never holds two
+  decoded copies at once. The smoke's own first assertion on that leg read a
+  list-summary-only field off the single-message shape (structurally red forever);
+  corrected to read `attachments[]` (#471).
+- **inbound (#442):** `/api/smtp-auth` and `/ingest` -- the two remaining PRE-GATE
+  routes -- now answer an unexpected throw with the same fixed
+  `500 E_INTERNAL_SERVER_ERROR` envelope the session path got in #441: no message echo,
+  detail to the worker log. The 5xx is load-bearing on the mail seams: both relay
+  callers branch on status alone, so `/ingest` stays SMTP 451 (the MTA retries) and an
+  smtp-auth outage stays an INFRA error -- never a `200 {ok:false}` that would read as
+  "wrong password" and strike the #105 throttle until every account locked out.
+  Verified against the real relay binary (#472).
+- **imap door (#458):** `POSTERN_API_TIMEOUT` drops 15s -> 5s on MEASUREMENT (680 live
+  calls; every door call class sits at 0.3-0.6s p99 except `GET /api/folders` at a
+  stable ~2.2s, which sets the floor), and zero/negative is now a loud startup refusal
+  (a 0 made every socket non-blocking: a door that looked configured and served
+  nothing). New worker CIRCUIT BREAKER (`POSTERN_API_BREAKER_*`, default 5 consecutive
+  TRANSPORT failures -> 30s cooldown): only timeouts/refused/reset count, any HTTP
+  answer resets it, and an OPEN circuit answers the same tagged `NO [UNAVAILABLE]` an
+  unreachable Worker already gets -- never an empty mailbox, pinned over the wire. Pool
+  exhaustion is now a rate-limited log line (`POSTERN_IMAP_POOL_LOG_SECONDS`) with the
+  suppressed-dispatch count carried forward, instead of a fact inferred from latency
+  (#474).
 
 ## v1.2.1
 
