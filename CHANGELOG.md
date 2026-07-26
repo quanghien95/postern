@@ -11,6 +11,40 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.1
+
+Patch release: the sprint-5 fix pair plus an honest deploy gate. No schema change, no
+contract change; the folders response is byte-identical. This is also the tag whose
+deploy produces the LIVE re-measure of `GET /api/folders` (#477 stays open until that
+number confirms the predicted band).
+
+- **inbound: `GET /api/folders` is ONE D1 statement** (#477, PR #481). The route used to
+  issue fifteen statements for a bare viewer (plus two per role queue), awaited in
+  series; against D1 every statement is a network round trip, which is what the measured
+  ~2.2s p50 actually was (the aggregation itself costs ~39ms at 50k rows). Counts are now
+  conditional aggregates over one pass, the per-recipient read override is a join on the
+  `message_seen_by` primary key, role queues are extra columns, and the drafts count plus
+  the durable-folder UIDVALIDITY values ride the same statement as scalar subqueries. The
+  lazy UID-counter mint now runs only for a folder with no counter row (once per estate),
+  so the steady-state read path writes nothing. The answer is proven unchanged against
+  the pre-#477 per-folder SQL as an in-suite oracle, and the one-statement cost is
+  asserted through the real handler, not described.
+- **inbound: the ingest path survives an omitted `TRUSTED_SENDER_DOMAINS`** (#473,
+  PR #480). `isTrusted()` now guards the read the way every sibling comma-list var
+  already does, so a clean-install operator who prunes the var gets an empty allowlist
+  (nothing trusted, message still stored) instead of a TypeError on EVERY inbound
+  message that surfaced as a transient infrastructure fault (CF redelivery retries
+  in-Worker; SMTP 451 retry-forever through the relay). `Env` still declares the var
+  required, matching the family convention (required declaration, guarded read), and the
+  convention is now documented on both sides so neither drifts.
+- **ci: the deploy smoke probe polls the sent-copy read-back** (#478). Attachments
+  persist via `ctx.waitUntil` AFTER the send answers -- deliberate, so sends stay fast --
+  which made an immediate read-back structurally racy: v1.2.0, v1.2.1, and v1.3.0 all
+  show a red probe step against deploys that were verified healthy (v1.2.x red was also
+  the real #470 defect, fixed in v1.3.0; the v1.3.0 red was purely this race, #479 has
+  the full cross-reference). The probe now polls on a bounded 10s deadline with the
+  assertions unchanged. This tag is the first whose gate can be believed.
+
 ## v1.3.0
 
 The single-source-roles release. One BREAKING change with a short operator migration
