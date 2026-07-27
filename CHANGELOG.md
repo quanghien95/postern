@@ -11,7 +11,7 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.3.6
 
 **Supervised deploy.** This release changes `RFC822.SIZE` and the `BODY[]` bytes for
 every existing UID, so it REQUIRES a `POSTERN_IMAP_UIDVALIDITY` bump on the same roll
