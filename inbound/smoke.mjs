@@ -194,6 +194,7 @@ async function main() {
   console.log("\n2. POST /api/send -> sent copy in the store");
   assert(cfg.to, "POSTERN_TO is required (distinct from POSTERN_FROM for the reply leg)", { from: cfg.from, to: cfg.to });
   let sentId;
+  let replyId;
   let threadId;
   {
     const subject = `${tag} send`;
@@ -235,7 +236,7 @@ async function main() {
       body: { messageId: sentId, text: "Reply leg of the smoke.", html: "<p>Reply leg of the smoke.</p>" },
     });
     assert(reply.status === 200 && reply.json?.ok === true, "POST /api/reply returns 200 ok:true", reply);
-    const replyId = reply.json?.messageId;
+    replyId = reply.json?.messageId;
     assert(typeof replyId === "string" && replyId !== sentId, "reply has its own distinct messageId", reply.json);
 
     const got = await api("GET", `/api/messages/${encodeURIComponent(replyId)}`);
@@ -434,7 +435,10 @@ async function main() {
     // know the SCOPE of the token it was handed, and the documented single-key default
     // (POSTERN_API_TOKEN = `both`) legitimately CAN delete. Asserting 403 would fail
     // the default deployment. The scope matrix is proved in inbound/scopes.test.ts.
-    for (const id of [sentId, attachmentId].filter(Boolean)) {
+    // replyId included (#496): the reply leg creates its own stored message, and it
+    // was the one class cleanup missed -- 25 of the 64 debris messages the first
+    // prod sweep removed were reply copies.
+    for (const id of [sentId, replyId, attachmentId].filter(Boolean)) {
       const del = await api("DELETE", `/api/messages/${encodeURIComponent(id)}`, { token: cfg.deleteToken });
       assert(del.status === 200 && del.json?.ok === true, `DELETE /api/messages/{id} removed ${id}`, del);
       const gone = await api("GET", `/api/messages/${encodeURIComponent(id)}`);
