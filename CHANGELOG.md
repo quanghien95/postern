@@ -11,6 +11,32 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.3
+
+Patch release: a stated decoded-size bound on the IMAP import seam, Message-ID
+round-trip integrity for ids carrying line breaks, and a CI smoke that cleans up
+after itself. No schema change, no route change, no migration.
+
+- **inbound: IMAP import decoded size is capped at 22 MiB** (#493, PR #498).
+  `rawMime` on `POST /api/imap/import` is checked BEFORE the MIME is parsed; past
+  the cap the answer is `413 E_PAYLOAD_TOO_LARGE` (the door maps it to a tagged
+  IMAP `NO`, never a 5xx). The number is derived from the 30 MiB JSON body cap and
+  base64's 4/3 inflation, so it refuses nothing a real client can send today;
+  raising the APPEND ceiling means moving both caps together (documented in
+  CONTRACT.md).
+- **inbound: a Message-ID carrying CR/LF is stored as its sha256** (#494, PR #499),
+  the same collapse the byte budget already applies, because a raw line break
+  cannot survive the RFC822 projection and forked the thread on reply. One rule:
+  verbatim unless the id cannot be represented. Placement preserves the pre-#486
+  legacy-row merge.
+- **smoke: runs clean up after themselves** (#496, PRs #497 + this release). New
+  `inbound/scripts/smoke-debris-sweep.mjs` (dry-run by default) removes probe
+  messages a smoke run left behind; leg-10 cleanup now also deletes the reply-leg
+  copy it created; and the deploy + staging workflows pass
+  `POSTERN_DELETE_TOKEN` (new `POSTERN_SMOKE_DELETE_TOKEN` secret, a dedicated
+  delete-scoped member), so CI smoke runs stop accumulating debris in the target
+  mailbox.
+
 ## v1.3.2
 
 Patch release: message identity kept verbatim, the IMAP door's last blocking read off
