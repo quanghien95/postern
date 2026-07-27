@@ -11,6 +11,40 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.5
+
+Patch release. The code change is CI-only, but the deploy is the point: it is what
+carries the role-queue configuration to the live Worker, since `vars` take effect only
+on a full `wrangler deploy` and never on a merge.
+
+- **Role queues are switched on** for `abuse@`, `postmaster@` and `alerts@`
+  (`POSTERN_VIEWER_ROLES`). The feature has been built, tested and shipped since
+  #425/#438, but the var was absent from the live Worker entirely, so no role queue had
+  ever been served. Membership is set in the operator's own config, not here; the
+  public template keeps its empty default. The value was validated against the real
+  parser (`parseViewerRoles`) before shipping rather than eyeballed, because that parser
+  fails CLOSED on the ENTIRE map: one malformed entry serves no role queue at all, which
+  is indistinguishable from "that person is not on the queue". Two negative controls
+  (duplicate role, role-as-own-member) were run alongside it so a green parse could not
+  be vacuous.
+- **ci: the drafts lifecycle now actually runs against a live instance** (PR #510).
+  `inbound/smoke.mjs` leg 9 has three blocks, and the third -- create, read back,
+  stale-PUT `409 E_CONFLICT`, PUT with the current `updatedAt`, DELETE -- had SKIPped on
+  every run since it was written, because neither workflow supplied
+  `POSTERN_IDENTITY_TOKEN`. The only `/api/drafts` behavior CI had ever proven live was
+  the two refusals. Both `deploy.yml` and `smoke-staging.yml` now supply it and share one
+  secret contract, so they stay at parity. The credential was pre-existing and escrowed;
+  nothing was minted and nothing was rotated. The leg deletes the draft it creates, so it
+  cannot leave debris. This was the last SKIP in the smoke.
+- **docs: two stale claims corrected** in the `smoke-debris-sweep.mjs` header (PR #510).
+  It stated that neither workflow wires `POSTERN_DELETE_TOKEN` (#496 changed that) and
+  that the `draft` subject forms can never come from a CI run (the change above makes
+  them possible). Both were true when written. The historical reason the 64-message
+  backlog existed is preserved.
+
+No schema change, no route change, no migration, no `PROJECTION_VERSION` or
+`UIDVALIDITY` bump.
+
 ## v1.3.4
 
 Patch release: two IMAP door correctness fixes and the structured-identifier
