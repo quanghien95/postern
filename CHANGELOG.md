@@ -11,6 +11,57 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.4
+
+Patch release: two IMAP door correctness fixes and the structured-identifier
+compliance fix. No schema change, no route change, no migration -- and no
+`PROJECTION_VERSION` or `UIDVALIDITY` bump, because a production count found zero
+affected rows (10634 rows, 0 non-ASCII `message_id`, 0 non-ASCII `in_reply_to`,
+detector controls verified live so the zeros are trustworthy).
+
+- **imap: the mailbox no longer reports itself empty mid-refresh** (#492, PR #503).
+  `_refresh` ended by re-sorting the live snapshot. That sort reordered nothing (the
+  list is uid-ascending by construction), but CPython DETACHES the backing array for
+  the whole duration of a keyed sort, so a synchronous accessor on the reactor thread
+  (`getMessageCount` after an APPEND, `getUID` after a STORE) could read it mid-sort
+  and see an EMPTY list. The door then pushed `* 0 EXISTS` for a folder that has mail,
+  and a client wipes its view of the folder on that. Reproduced at roughly a 10%
+  window across 500 rows, now covered by two regression gates.
+- **imap: one mailbox operation at a time, ordered** (#492, PR #505). Twisted does not
+  serialize commands per connection (`blocked` is set only inside `__cbFetch`), so two
+  commands against the same mailbox could be in the threadpool at once, each having
+  resolved sequence numbers against a snapshot the other was mutating. RFC 3501 /
+  RFC 9051 section 5.5 puts that obligation on the server, and mutt (pipeline depth 15)
+  and mbsync (unlimited) pipeline by default. Every worker-touching operation now takes
+  a turn in a per-mailbox FIFO queue whose waiters are Deferreds on the reactor thread,
+  so a waiter costs no pool thread and the pool stays free for other mailboxes (a mutex
+  would have reintroduced the #416 starvation one level down). COPY/MOVE resolves its
+  source rows and moves them in ONE crossing, since two queue entries are two turns by
+  definition. The `_refresh_lock` is retired.
+  - **Behavior change:** a COPY/MOVE whose SOURCE read fails with a `MailboxException`
+    (an unreachable worker on a cold snapshot) now answers a tagged `NO` where it
+    answered `BAD`. `BAD` means the server could not parse the command; a worker the
+    door cannot reach is not a protocol error, and the identical failure one call later
+    already answered `NO` (RFC 3501 section 7.1).
+- **inbound + imap: a message identifier is emitted, not RFC 2047 encoded** (#500,
+  PR #506). `Message-ID` and `In-Reply-To` are structured fields, and RFC 2047 section 5
+  is an explicit MUST NOT for encoded-words there. Measured against Mutt 2.2.12: the
+  encoded-word was echoed back VERBATIM in `In-Reply-To`, so the reply forked its thread.
+  Both projectors are changed in lockstep, with the same byte constants asserted on both
+  sides so one cannot move without the other. `_to_wire` is hardened to accept whatever
+  the stdlib parser returns: under compat32 a non-ASCII header line comes back as an
+  `email.header.Header`, not a `str`, which raised in both `spew_envelope` and
+  `spew_body` and hung the FETCH.
+- **inbound: an identifier the door cannot serve is collapsed, and matched in both
+  forms** (#500, PR #508). Extends the existing rule -- verbatim unless the id cannot be
+  represented (#486, #494) -- to the third way that happens: a non-ASCII id, which
+  RFC 6532 makes LEGAL but which our door cannot carry until it implements RFC 6855
+  `UTF8=ACCEPT` (#504). Thread resolution applies the IDENTICAL transform to
+  `in_reply_to` / `references` before matching, trying the raw form FIRST, so a sender
+  quoting its own raw id still finds the collapsed parent and no lookup that succeeded
+  before can start failing. Verified live: the reply now inherits the thread where it
+  previously forked, with a never-stored control still forking.
+
 ## v1.3.3
 
 Patch release: a stated decoded-size bound on the IMAP import seam, Message-ID
