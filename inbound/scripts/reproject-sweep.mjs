@@ -151,12 +151,57 @@ async function main() {
       `${totals.unchanged} already current, ${totals.missing} missing, ${totals.failed} failed.`,
   );
 
-  if (storeTotal !== null && totals.processed !== storeTotal) {
+  // storeTotal is a COUNT(*) sampled once, at the START of the sweep, before this
+  // page's rows were even read (store.ts reprojectPage, #515). That ordering makes
+  // it a lower bound AT THAT INSTANT, but a live mailbox does not only grow: CI's
+  // smoke self-clean, hand-run debris sweeps, and IMAP EXPUNGE all delete rows too,
+  // and a row deleted mid-run can never be walked once it is gone -- comparing
+  // processed to the START total alone would FATAL on a sweep that genuinely
+  // covered everything that still exists, the same false-failure class this guard
+  // exists to kill, just through deletion instead of growth. So re-sample the
+  // total again now, at the END, with one cheap dry-run page (writes nothing,
+  // reads at most one row), and check completeness against whichever of the two
+  // totals is SMALLER: growth only ever raises the end total (start is then the
+  // binding constraint), deletion only ever lowers it (end is then the binding
+  // constraint), and a genuinely truncated walk (the bug class above: a renamed or
+  // dropped cursor field once stopped a different sweep script quietly at 50 of 64
+  // rows) falls short of BOTH.
+  let endTotal = null;
+  if (storeTotal !== null) {
+    try {
+      const recheck = await reprojectPage({ dryRun: true, limit: 1 });
+      if (typeof recheck.total === "number") endTotal = recheck.total;
+    } catch (e) {
+      console.error(
+        `WARNING: could not re-sample the store total at the end of the run (${e.message}). ` +
+          `Falling back to the start-of-run total only -- this run cannot distinguish a ` +
+          `deleted-row shortfall from a genuinely incomplete walk.`,
+      );
+    }
+  }
+  const floorTotal =
+    storeTotal === null ? null : endTotal === null ? storeTotal : Math.min(storeTotal, endTotal);
+
+  if (floorTotal !== null && totals.processed < floorTotal) {
     console.error(
-      `FATAL: examined ${totals.processed} rows but the store reported ${storeTotal}. ` +
+      `FATAL: examined ${totals.processed} rows but ${floorTotal} were guaranteed present ` +
+        `throughout this run (start total ${storeTotal}, end total ${endTotal ?? "not re-sampled"}). ` +
         `The sweep did NOT cover the whole mailbox.`,
     );
     process.exit(1);
+  }
+  if (floorTotal !== null && totals.processed !== floorTotal) {
+    const drift =
+      endTotal !== null && endTotal !== storeTotal
+        ? ` (start total ${storeTotal}, end total ${endTotal}, ${endTotal > storeTotal ? "grew" : "shrank"} by ${Math.abs(endTotal - storeTotal)} during the run)`
+        : "";
+    console.log(
+      `NOTE: examined ${totals.processed} rows, ${totals.processed - floorTotal} more than ` +
+        `the ${floorTotal} row(s) floor${drift}. That is expected on a live mailbox -- mail ` +
+        `arriving during the run is already at the current projection version and never ` +
+        `needed this sweep, and a row deleted during the run never needed it either. It does ` +
+        `not indicate missed rows.`,
+    );
   }
   if (totals.failed > 0) {
     console.error(
