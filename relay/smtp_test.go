@@ -68,8 +68,11 @@ func TestSplitListen(t *testing.T) {
 		want []string
 	}{
 		{"single", "127.0.0.1:2525", []string{"127.0.0.1:2525"}},
-		{"comma list", "127.0.0.1:2525,172.17.0.1:2525", []string{"127.0.0.1:2525", "172.17.0.1:2525"}},
-		{"spaces trimmed", " 127.0.0.1:2525 , 172.17.0.1:2525 ", []string{"127.0.0.1:2525", "172.17.0.1:2525"}},
+		// Second address is RFC5737 documentation (192.0.2.0/24), not a private
+		// RFC1918 range -- keeps the topology scrub (#527) clean while still
+		// exercising multi-listen parsing.
+		{"comma list", "127.0.0.1:2525,192.0.2.1:2525", []string{"127.0.0.1:2525", "192.0.2.1:2525"}},
+		{"spaces trimmed", " 127.0.0.1:2525 , 192.0.2.1:2525 ", []string{"127.0.0.1:2525", "192.0.2.1:2525"}},
 		{"empty string", "", nil},
 		{"only commas and spaces", " , , ", nil},
 		{"trailing comma ignored", "127.0.0.1:2525,", []string{"127.0.0.1:2525"}},
