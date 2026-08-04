@@ -465,49 +465,46 @@ class ProjectedSizeTest(unittest.TestCase):
         self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[data])))
         self.assertEqual(PROJECTION_VERSION, 4)
 
-    def test_unicode_projection_sizes_match_worker_goldens(self):
-        # Lockstep with inbound/projected-size.test.ts (projection v3, CRLF #507).
+    def test_unicode_projection_size_matches_own_render(self):
+        """Fast local pin: projected size equals this engine's own render length.
+
+        #537: the old name claimed these numbers "match worker goldens", but the
+        constants were hand-copied into both suites and never ran the other
+        engine. Cross-engine byte equality lives in
+        test_projection_cross_engine.py (shared fixture set). Here we only pin
+        that project_rfc822_size stays consistent with render_rfc822 -- values
+        are GENERATED from the render, not typed.
+        """
         cases = [
-            (
-                _msg(message_id="u1", subject="café", body_text="hi"),
-                240,
+            _msg(message_id="u1", subject="café", body_text="hi"),
+            _msg(
+                message_id="u2",
+                from_addr="José <jose@example.com>",
+                subject="Hello",
+                body_text="hi",
             ),
-            (
-                _msg(
-                    message_id="u2",
-                    from_addr="José <jose@example.com>",
-                    subject="Hello",
-                    body_text="hi",
-                ),
-                247,
+            _msg(
+                message_id="u3",
+                subject="Hello",
+                body_text="hi",
+                attachments=[Attachment(filename="résumé.pdf", mime="application/pdf", size=10)],
             ),
-            (
-                _msg(
-                    message_id="u3",
-                    subject="Hello",
-                    body_text="hi",
-                    attachments=[Attachment(filename="résumé.pdf", mime="application/pdf", size=10)],
-                ),
-                633,
-            ),
-            (
-                _msg(message_id="u4", subject=("Long " * 40) + "café", body_text="hi"),
-                508,
-            ),
-            (
-                _msg(message_id="u5", subject="Hello café world", body_text="hi"),
-                256,
+            _msg(message_id="u4", subject=("Long " * 40) + "café", body_text="hi"),
+            _msg(message_id="u5", subject="Hello café world", body_text="hi"),
+            _msg(body_text="line one\nline two"),
+            _msg(
+                body_text="line one",
+                attachments=[Attachment(filename="f.pdf", mime="application/pdf", size=100)],
             ),
         ]
-        for msg, expected in cases:
+        for msg in cases:
             with self.subTest(message_id=msg.message_id):
-                self.assertEqual(project_rfc822_size(msg), expected)
-                if msg.attachments:
-                    placeholders = [b"\0" * a.size for a in msg.attachments]
-                    self.assertEqual(
-                        project_rfc822_size(msg),
-                        len(render_rfc822(msg, attachment_bytes=placeholders)),
-                    )
+                placeholders = (
+                    [b"\0" * a.size for a in msg.attachments] if msg.attachments else None
+                )
+                rendered = render_rfc822(msg, attachment_bytes=placeholders)
+                self.assertEqual(project_rfc822_size(msg), len(rendered))
+                self.assertGreater(len(rendered), 50)
 
 
 class StructuredIdentifierTest(unittest.TestCase):
