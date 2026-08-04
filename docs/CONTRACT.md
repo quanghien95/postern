@@ -1051,6 +1051,19 @@ to write). Every row is recomputed through `store.projectedSizeFor`, the same en
 live ingest uses, and every write is READ BACK and reported as `failed` if it did not
 land. The sweep is idempotent and safe to re-run after an interruption.
 
+**Count-only mode (#520):** `POST /api/admin/reproject` with `{ "countOnly": true }` is a
+read-only aggregate census -- no paging, no writes:
+
+```json
+{ "ok": true, "countOnly": true, "total": N, "atCurrent": K, "notCurrent": M, "projectionVersion": 4 }
+```
+
+`notCurrent` is `COUNT(*)` where `projection_version` is NULL or not equal to the live
+`PROJECTION_VERSION` constant. The same result always satisfies
+`atCurrent + notCurrent === total` (positive control against a broken WHERE that would
+read as a clean sweep). This is the authoritative answer the operator (and the runner
+after a write pass) should trust over the paging start/end total floor (#515).
+
 ### 10.4 Write side: who populates what
 
 | field | inbound (in-Worker driver) | inbound (relay `/ingest`) | outbound (`mailbox`) |

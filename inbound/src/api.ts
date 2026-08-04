@@ -1250,10 +1250,15 @@ async function handleReindex(request: Request, env: Env): Promise<Response> {
 // POST /api/admin/reproject: recompute projected_size over the existing mailbox after
 // a PROJECTION_VERSION bump (#507). One keyset page per call, returns a cursor; the
 // runner (scripts/reproject-sweep.mjs) loops until done:true. Body: { cursor?, limit?,
-// dryRun? }. Idempotent (the same message projects to the same number); dryRun reports
-// exactly what WOULD change and writes nothing.
+// dryRun?, countOnly? }. Idempotent (the same message projects to the same number);
+// dryRun reports exactly what WOULD change and writes nothing.
+//
+// countOnly (#520): read-only aggregate census -- { total, atCurrent, notCurrent,
+// projectionVersion }. No paging, no writes. The authoritative answer to "how many
+// rows are still not at PROJECTION_VERSION", which the runner's start/end total
+// floor (#515) can only approximate.
 async function handleReproject(request: Request, env: Env): Promise<Response> {
-  let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown } = {};
+  let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown; countOnly?: unknown } = {};
   try {
     const text = await readBodyCapped(request, MAX_BODY_BYTES);
     if (text) body = JSON.parse(text) as typeof body;
@@ -1262,6 +1267,10 @@ async function handleReproject(request: Request, env: Env): Promise<Response> {
       return json({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
     }
     return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+  }
+  if (body.countOnly === true) {
+    const counts = await store.countProjectionStatus(env);
+    return json({ ok: true, countOnly: true, ...counts });
   }
   const cursor = typeof body.cursor === "string" ? body.cursor : undefined;
   const limit = typeof body.limit === "number" ? body.limit : undefined;

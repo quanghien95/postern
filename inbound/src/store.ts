@@ -2601,6 +2601,53 @@ export async function countMessages(env: Env): Promise<number> {
   return row?.n ?? 0;
 }
 
+/**
+ * Authoritative projection-version census for the whole estate (#520).
+ *
+ * Answers the question the reproject runner and operators actually need after a
+ * PROJECTION_VERSION bump: how many rows are NOT at the current version, right
+ * now -- without paging the mailbox and without privileged D1 access.
+ *
+ * Single aggregate query. `atCurrent + notCurrent === total` is an invariant of
+ * the same result (the positive control against a broken WHERE that would read
+ * as a clean sweep). `notCurrent` is NULL version OR any version other than
+ * PROJECTION_VERSION.
+ */
+export interface ProjectionCountResult {
+  total: number;
+  atCurrent: number;
+  notCurrent: number;
+  /** The PROJECTION_VERSION constant the counts were evaluated against. */
+  projectionVersion: number;
+}
+
+export async function countProjectionStatus(env: Env): Promise<ProjectionCountResult> {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS total, " +
+      "COALESCE(SUM(CASE WHEN projection_version = ? THEN 1 ELSE 0 END), 0) AS at_current, " +
+      "COALESCE(SUM(CASE WHEN projection_version IS NULL OR projection_version != ? THEN 1 ELSE 0 END), 0) AS not_current " +
+      "FROM messages",
+  )
+    .bind(PROJECTION_VERSION, PROJECTION_VERSION)
+    .first<{ total: number; at_current: number; not_current: number }>();
+  const total = Number(row?.total ?? 0);
+  const atCurrent = Number(row?.at_current ?? 0);
+  const notCurrent = Number(row?.not_current ?? 0);
+  // Invariant of the same result: a broken CASE would drop rows from both
+  // buckets and still look "clean" if the caller only checked notCurrent === 0.
+  if (atCurrent + notCurrent !== total) {
+    throw new Error(
+      `projection count invariant broken: atCurrent(${atCurrent}) + notCurrent(${notCurrent}) !== total(${total})`,
+    );
+  }
+  return {
+    total,
+    atCurrent,
+    notCurrent,
+    projectionVersion: PROJECTION_VERSION,
+  };
+}
+
 /** pageForReindex keyset-pages the messages table by the SAME (date DESC, id DESC)
  *  order + opaque cursor the read API uses, pulling body_text + the metadata fields
  *  in one query (no N+1). */

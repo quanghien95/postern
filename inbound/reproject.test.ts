@@ -232,3 +232,54 @@ describe("reproject sweep (#507)", () => {
     expect(live?.projected_size).toBeGreaterThan(100);
   });
 });
+
+describe("projection version census (#520)", () => {
+  it("counts known-stale rows before a sweep and zero after", async () => {
+    const { env, ctx, settle } = makeFakeEnv();
+    await put(env, ctx, settle, { id: "c1@x", date: "2026-01-01T00:00:00.000Z" });
+    await put(env, ctx, settle, { id: "c2@x", date: "2026-01-02T00:00:00.000Z" });
+    await makeStale(env, "c1@x");
+    // c2 stays current (live ingest writes PROJECTION_VERSION).
+
+    const before = await store.countProjectionStatus(env);
+    expect(before.total).toBe(2);
+    expect(before.atCurrent).toBe(1);
+    expect(before.notCurrent).toBe(1);
+    expect(before.atCurrent + before.notCurrent).toBe(before.total);
+    expect(before.projectionVersion).toBe(PROJECTION_VERSION);
+
+    await store.reprojectPage(env, {});
+
+    const after = await store.countProjectionStatus(env);
+    expect(after.total).toBe(2);
+    expect(after.atCurrent).toBe(2);
+    expect(after.notCurrent).toBe(0);
+    expect(after.atCurrent + after.notCurrent).toBe(after.total);
+  });
+
+  it("treats a NULL projection_version as not current", async () => {
+    const { env, ctx, settle } = makeFakeEnv();
+    await put(env, ctx, settle, { id: "n1@x", date: "2026-01-03T00:00:00.000Z" });
+    await env.DB.prepare(
+      "UPDATE messages SET projected_size = ?, projection_version = ? WHERE message_id = ?",
+    )
+      .bind(1, null, "n1@x")
+      .run();
+
+    const counts = await store.countProjectionStatus(env);
+    expect(counts.total).toBe(1);
+    expect(counts.notCurrent).toBe(1);
+    expect(counts.atCurrent).toBe(0);
+  });
+
+  it("empty store reports zeros with the invariant holding", async () => {
+    const { env } = makeFakeEnv();
+    const counts = await store.countProjectionStatus(env);
+    expect(counts).toEqual({
+      total: 0,
+      atCurrent: 0,
+      notCurrent: 0,
+      projectionVersion: PROJECTION_VERSION,
+    });
+  });
+});

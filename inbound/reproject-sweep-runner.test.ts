@@ -24,7 +24,25 @@ function serve(pages: any[], recorded: Recorded): Promise<Server> {
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
-      recorded.bodies.push(raw ? JSON.parse(raw) : {});
+      const body = raw ? JSON.parse(raw) : {};
+      recorded.bodies.push(body);
+      // #520 census is a separate request shape; answer it without consuming walk
+      // pages unless a scripted countOnly response was explicitly queued first.
+      if (body.countOnly === true) {
+        const scripted =
+          pages.length > 0 && pages[0] && pages[0].countOnly === true ? pages.shift() : null;
+        const next = scripted ?? {
+          ok: true,
+          countOnly: true,
+          total: 0,
+          atCurrent: 0,
+          notCurrent: 0,
+          projectionVersion: 4,
+        };
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(next));
+        return;
+      }
       const next = pages.shift() ?? { ok: true, done: true, processed: 0 };
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(next));
@@ -70,9 +88,12 @@ describe("reproject sweep runner (#507)", () => {
     );
     const { code, out } = await run(open);
     expect(code).toBe(0);
-    expect(recorded.bodies.every((b) => b.dryRun === true)).toBe(true);
+    // Walk pages are dry-run; the trailing #520 census has countOnly and no dryRun.
+    expect(recorded.bodies.filter((b) => !b.countOnly).every((b) => b.dryRun === true)).toBe(true);
+    expect(recorded.bodies.some((b) => b.countOnly === true)).toBe(true);
     expect(out).toContain("dry-run");
     expect(out).toContain("Nothing was written");
+    expect(out).toContain("Census");
   });
 
   it("--yes is what flips it to writing", async () => {
@@ -83,11 +104,14 @@ describe("reproject sweep runner (#507)", () => {
     );
     const { code, out } = await run(open, ["--yes"]);
     expect(code).toBe(0);
-    // The walk itself writes (dryRun:false); the end-of-run total recheck (#515) is
-    // ALWAYS a dry run regardless of --yes, since it exists only to read a count, so
-    // it is excluded from this check and asserted separately.
-    expect(recorded.bodies.slice(0, -1).every((b) => b.dryRun === false)).toBe(true);
-    expect(recorded.bodies[recorded.bodies.length - 1]).toMatchObject({ dryRun: true, limit: 1 });
+    // Walk writes (dryRun:false); end-of-run total recheck (#515) is always dry-run;
+    // trailing #520 census is countOnly (no dryRun).
+    const walk = recorded.bodies.filter((b) => !b.countOnly && !(b.dryRun === true && b.limit === 1));
+    const recheck = recorded.bodies.find((b) => b.dryRun === true && b.limit === 1);
+    const census = recorded.bodies.find((b) => b.countOnly === true);
+    expect(walk.every((b) => b.dryRun === false)).toBe(true);
+    expect(recheck).toMatchObject({ dryRun: true, limit: 1 });
+    expect(census).toMatchObject({ countOnly: true });
     expect(out).toContain("MODE: WRITE");
   });
 
@@ -105,7 +129,8 @@ describe("reproject sweep runner (#507)", () => {
     );
     const { code, out } = await run(open, ["--yes"]);
     expect(code).toBe(0);
-    expect(recorded.bodies.length).toBe(4);
+    // 3 walk pages + 1 recheck + 1 census
+    expect(recorded.bodies.length).toBe(5);
     // CONTROL: it really did send the cursors back, in order. A runner that ignored
     // them would still make three calls against this server and still "pass".
     expect(recorded.bodies[1].cursor).toBe("c1");
@@ -113,6 +138,7 @@ describe("reproject sweep runner (#507)", () => {
     // the 4th call is the end-of-run recheck: no cursor, always dry-run, cheap (limit 1)
     expect(recorded.bodies[3]).toMatchObject({ dryRun: true, limit: 1 });
     expect(recorded.bodies[3].cursor).toBeUndefined();
+    expect(recorded.bodies[4]).toMatchObject({ countOnly: true });
     expect(out).toContain("5 of 5 row(s) examined");
   });
 
@@ -175,9 +201,34 @@ describe("reproject sweep runner (#507)", () => {
     expect(out).toContain("NOTE");
     expect(out).toContain("shrank");
     expect(out).not.toContain("FATAL");
-    expect(recorded.bodies.length).toBe(2);
+    // walk + recheck + census
+    expect(recorded.bodies.length).toBe(3);
     expect(recorded.bodies[1]).toMatchObject({ dryRun: true, limit: 1 });
     expect(recorded.bodies[1].cursor).toBeUndefined();
+    expect(recorded.bodies[2]).toMatchObject({ countOnly: true });
+  });
+
+  it("FATALs a write run when the #520 census still reports notCurrent rows", async () => {
+    const recorded: Recorded = { bodies: [] };
+    open = await serve(
+      [
+        { ok: true, total: 2, processed: 2, updated: 1, unchanged: 1, missing: 0, failed: 0, nextCursor: null, done: true },
+        { ok: true, total: 2, processed: 1, updated: 0, unchanged: 1, missing: 0, failed: 0, nextCursor: null, done: true, dryRun: true },
+        {
+          ok: true,
+          countOnly: true,
+          total: 2,
+          atCurrent: 1,
+          notCurrent: 1,
+          projectionVersion: 4,
+        },
+      ],
+      recorded,
+    );
+    const { code, err } = await run(open, ["--yes"]);
+    expect(code).toBe(1);
+    expect(err).toContain("still not at projection");
+    expect(recorded.bodies.some((b) => b.countOnly === true)).toBe(true);
   });
 
   it("still fails when coverage is genuinely incomplete (processed ends up below both totals)", async () => {
