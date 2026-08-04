@@ -191,6 +191,10 @@ jobs:
   # pushing tags, so their suites run here on every PR -- a gate whose refusals
   # are never watched to fail is decoration. Both suites carry a positive control
   # so a passing run cannot be a dead path.
+  #
+  # Topology scrub (#527): the June HEAD scrub (#177) regressed once when a fleet
+  # hostname reappeared in imap/bench/README.md. The gate + its suite live here
+  # so a reintroduction fails CI rather than waiting for the next audit.
   release-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -203,6 +207,8 @@ jobs:
         run: bash .github/scripts/tests/tag-preflight.test.sh
       - name: post-deploy artifact verification
         run: bash .github/scripts/tests/verify-worker-deployment.test.sh
+      - name: topology scrub (fleet hostnames + RFC1918)
+        run: bash .github/scripts/tests/check-topology-scrub.test.sh
 
   ci:
     name: ci
