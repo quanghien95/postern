@@ -170,40 +170,45 @@ Authoritative contract: **[`docs/SEND-IDENTITIES.md`](../docs/SEND-IDENTITIES.md
 How it works (the MCP client implements none of it; the worker is authoritative):
 
 - The worker holds one config var `POSTERN_SEND_IDENTITIES` mapping the **sha256 hex
-  of a raw send token** to `{ from, displayName? }` (hashes, never raw tokens; it holds
-  no credential, so it is a readable var, not a secret -- #335).
-- On `POST /api/send` / `/api/reply`, when the presented Bearer resolves to a registry
-  entry, the worker **overrides** the outbound `From` to that bound identity and
-  discards any caller-supplied `from`. A token cannot send as anyone else. The stored
-  outbound row's `from_addr` is that identity (lowercased), threaded and indexed.
-- An unknown token is `401`; a send token on a read/admin route is `403`. A registry
+  of a raw token** to `{ from, displayName?, scopes? }` (hashes, never raw tokens; it
+  holds no credential, so it is a readable var, not a secret -- #335).
+- **Send:** on `POST /api/send` / `/api/reply`, a registry token with the `send` cap
+  has outbound `From` overridden to the bound identity; any caller `from` is discarded.
+- **Read (#544):** on list/search/get, a registry token with the `read` cap is forced
+  to that identity's mailbox (+ role queues). Estate static tokens stay estate-wide.
+- An unknown token is `401`; a token without the needed cap is `403`. A registry
   `from` off `ALLOWED_FROM_DOMAIN` fails loud, nothing sent. Full table:
   `docs/SEND-IDENTITIES.md` section 6.
 
-For the agent operator the wiring is unchanged from the section above: put **your own**
-per-identity send token in `POSTERN_SEND_TOKEN` (out of band, never in a tracked file),
-and the worker binds your From for you. You do not set or send a `from`; it is stamped.
+**Operator wiring (one agent, one identity):**
+
+1. Register `sha256hex(token) -> { from, scopes: ["read"] }` or `["read","send"]`
+   (`docs/SEND-IDENTITIES.md` section 7).
+2. Put the **raw** token in that agent's MCP `POSTERN_API_TOKEN` (out of band).
+3. For send with the same token: set `POSTERN_MCP_SEND=1`, **or** set
+   `POSTERN_SEND_TOKEN` to the same value. For a separate send-only registry token,
+   put that in `POSTERN_SEND_TOKEN` only.
+
+Do not put an estate `POSTERN_API_TOKEN` / `_READ` into multi-person MCP configs.
 
 ### Rollout: opt-in per identity (deliberate toggle)
 
-Sending is a mutating capability, so it ships **off until a send token is present**.
-The read MCP is unchanged for everyone. Enabling send for an agent is a deliberate,
-gated step: register the agent's `sha256hex(token) -> { from }` in the worker's
-`POSTERN_SEND_IDENTITIES` registry var (no code change; `docs/SEND-IDENTITIES.md` section 7),
-hand the agent its **raw** token out of band, and set `POSTERN_SEND_TOKEN` in that
-agent's MCP server `env`. Until that toggle is flipped, the send tools do not exist at
-runtime. Do not wire a send token into shared/default agent config silently; each
-agent gets its own identity-bound token.
+Sending is a mutating capability, so it ships **off until a send credential is present**
+(`POSTERN_SEND_TOKEN` or `POSTERN_MCP_SEND=1`). Read tools always register. Enabling
+send for an agent is a deliberate, gated step -- register the identity, hand out the
+raw token, set env. Until that toggle is flipped, the send tools do not exist at
+runtime. Do not wire send into shared/default agent config silently; each agent gets
+its own identity-bound token.
 
 ## Security
 
-- Tokens are read from the environment only and never logged. Give the server a
-  **read** token for read-only use; add a **send** token only to enable sending.
-- A leaked token is bounded by its scope: a read token cannot send; a send token
-  cannot read or administer (#85). A per-identity send token can only send **as its
-  own bound identity** (the worker stamps the From).
-- The registry stores token **hashes**, never raw tokens; reading the secret yields no
-  usable credential (`docs/SEND-IDENTITIES.md` section 5).
+- Tokens are read from the environment only and never logged. Prefer a
+  **per-identity registry** token with `scopes: ["read"]` for multi-person use.
+- A leaked token is bounded by its caps: read cannot send; send cannot read or
+  administer (#85). A registry token can only act as its bound identity (From on
+  send; forced viewer on read -- #544).
+- The registry stores token **hashes**, never raw tokens; reading the deploy var
+  yields no usable credential (`docs/SEND-IDENTITIES.md` section 5).
 - Do not commit a real token. `.env.example` is a reference only.
 
 ## Develop

@@ -15,19 +15,22 @@ do not embed a second store.
 
 | Package | Registry | Install | Send? |
 |---------|----------|---------|-------|
-| `@skyphusion/postern-mcp` | [npm](https://www.npmjs.com/package/@skyphusion/postern-mcp) | `npx -y @skyphusion/postern-mcp` | opt-in (`POSTERN_SEND_TOKEN`) |
+| `@skyphusion/postern-mcp` | [npm](https://www.npmjs.com/package/@skyphusion/postern-mcp) | `npx -y @skyphusion/postern-mcp` | opt-in (`POSTERN_SEND_TOKEN` or `POSTERN_MCP_SEND=1`) |
 | `postern-client` | [PyPI](https://pypi.org/project/postern-client/) | `pip install postern-client` | if token allows |
 
-Both need your deployed origin and a read-scoped API token:
+Both need your deployed origin and a Bearer token:
 
 ```bash
 export POSTERN_API_URL=https://postern.<your-account>.workers.dev
-export POSTERN_API_TOKEN=<read-scoped token>
+# Prefer a per-identity registry token with scopes including "read" (#544) for
+# multi-person use. An estate POSTERN_API_TOKEN / _READ is estate-wide by design.
+export POSTERN_API_TOKEN=<read-capable token>
 ```
 
 **MCP:** configure your agent's MCP server with `command: npx`, `args: ["-y", "@skyphusion/postern-mcp"]`,
-and the env vars above. Full tool list, send opt-in, and per-identity send:
-[mcp/README.md](../mcp/README.md).
+and the env vars above. Full tool list, send opt-in (`POSTERN_SEND_TOKEN` /
+`POSTERN_MCP_SEND=1`), and identity-bound multi-person wiring:
+[mcp/README.md](../mcp/README.md), [SEND-IDENTITIES.md](SEND-IDENTITIES.md).
 
 **Python:** CLI (`postern ping`, `postern list`, `postern search`, `postern send`,
 `postern folders`, `postern seen`, `postern flags`, `postern move`, `postern delete`,

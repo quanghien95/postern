@@ -165,6 +165,13 @@ export POSTERN_API_TOKEN=<your-token>
 postern ping
 ```
 
+For **more than one person or agent**, mint a per-identity registry token with
+`"scopes": ["read"]` (or `["read","send"]`) and put **that** token in each client's
+`POSTERN_API_TOKEN` -- do not share the estate API token. Register identities in
+`POSTERN_SEND_IDENTITIES` (config var; see
+[docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md) section 7). MCP send opt-in:
+`POSTERN_SEND_TOKEN` or `POSTERN_MCP_SEND=1` ([mcp/README.md](mcp/README.md)).
+
 See [docs/INTEGRATION.md](docs/INTEGRATION.md), [mcp/README.md](mcp/README.md), and
 [clients/python/README.md](clients/python/README.md).
 

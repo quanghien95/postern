@@ -1,8 +1,8 @@
-# Per-identity send registry (#28)
+# Per-identity credential registry (#28 / #544)
 
 > Interface Control Document. This file is the contract: the registry var, its
-> JSON shape, how a token maps to a From, and how an operator registers a new
-> per-member token. Reproducible from this doc alone.
+> JSON shape, how a token maps to an identity and caps (`read` / `send`), and how
+> an operator registers a new per-member token. Reproducible from this doc alone.
 
 ## 1. Why
 
@@ -137,11 +137,11 @@ flowchart TD
 
 ## 5. Why hashes, not raw tokens
 
-The registry stores `sha256(token)`, so the secret itself never holds a plaintext send
-credential: a read of the secret does not yield usable tokens. Resolution hashes the
-presented Bearer and indexes the map by that hash. The Map lookup is not constant-time,
-but it indexes a hash of a high-entropy secret (not the secret), so it does not leak the
-token. The static-token path keeps the existing constant-time compare.
+The registry stores `sha256(token)`, so the **var** never holds a plaintext credential:
+reading the deployed config or the live vars does not yield usable tokens. Resolution
+hashes the presented Bearer and indexes the map by that hash. The Map lookup is not
+constant-time, but it indexes a hash of a high-entropy secret (not the secret), so it
+does not leak the token. The static-token path keeps the existing constant-time compare.
 
 ## 6. Deny-by-default (failure modes)
 
@@ -169,33 +169,57 @@ HASH=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 
 # 3. MERGE the new entry into the CURRENT registry value (never overwrite blind;
 #    the current value is readable from your deploy config, or from the live
-#    worker if the config drifted):
-#    { "<HASH>": { "from": "<member>@skyphusion.org", "displayName": "<Name>" }, ... }
+#    worker if the config drifted). Include scopes for the functions this token
+#    may use (#544):
+#
+#    Send-only (historical default if scopes omitted):
+#    { "<HASH>": { "from": "<member>@example.com", "displayName": "<Name>" } }
+#
+#    Read-only MCP / agent mailbox (forced to this identity):
+#    { "<HASH>": { "from": "<member>@example.com", "scopes": ["read"] } }
+#
+#    One token for both read + send (MCP: POSTERN_API_TOKEN + POSTERN_MCP_SEND=1):
+#    { "<HASH>": { "from": "<member>@example.com", "scopes": ["read", "send"],
+#                  "displayName": "<Name>" } }
+#
 #    Put the merged object in the "vars" block of your wrangler config as
 #    POSTERN_SEND_IDENTITIES (JSON as a string), then:
 wrangler deploy
 
 # 4. Hand each member their RAW $TOKEN out of band (e.g. crew-secrets, per-member
 #    age recipient). The raw token NEVER lands in the registry or any tracked file.
+#
+#    MCP wiring (multi-person): each person's client env gets ONLY their token as
+#    POSTERN_API_TOKEN. For read+send, also set POSTERN_MCP_SEND=1 (or set
+#    POSTERN_SEND_TOKEN to the same raw value). Never share an estate
+#    POSTERN_API_TOKEN / _READ across people -- that credential is estate-wide.
 ```
 
 Each member then presents their own raw token as `Authorization: Bearer <token>` from
-their own MCP / client config; the worker binds the From to their identity.
+their own MCP / client config. With the `send` cap the worker binds From; with the
+`read` cap it forces every list/search/get to that identity.
 
 To rotate: mint a new token, add its hash, deploy, hand out the new raw token, then
 remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
 
 ## 8. Scope and boundaries
 
-- Registry tokens are `send` scope ONLY. They cannot read the store (`GET` doors -> `403`)
-  and cannot reach credential-admin / reindex / reconcile (`403`); those remain `both`-only.
-- The registry is purely ADDITIVE. The static `POSTERN_API_TOKEN_SEND` keeps working as
-  the **un-bound** send token (From falls back to the caller's `from` / `DEFAULT_FROM`,
-  validated against `ALLOWED_FROM_DOMAIN`), so existing single-key and scoped-token
-  deployments are unchanged.
-- This is the backend half of the per-identity send rollout. It pairs with the shared
-  god-token retirement (#28); minting the per-member tokens + setting this secret + the
-  MCP/client wiring are the infra half.
+- Registry tokens grant only the caps in `scopes` (default `["send"]` when omitted).
+  They **never** grant delete or admin: credential-admin / reindex / reconcile /
+  hard-delete stay on static `POSTERN_API_TOKEN` (`both`) or the dedicated delete
+  slot.
+- **`scopes: ["read"]` or `["read","send"]` (#544):** the token may hit the read
+  doors, but the worker forces the viewer to the bound identity (+ that identity's
+  role queues). Callers cannot widen via `to=` / `lens` / `mailbox` the way an
+  estate read token can.
+- **`scopes: ["send"]` or omitted:** send/reply + own-draft CRUD as that identity;
+  read doors return `403` (historical send-only posture).
+- The registry is purely ADDITIVE. The static `POSTERN_API_TOKEN_SEND` keeps working
+  as the **un-bound** send token (From falls back to the caller's `from` /
+  `DEFAULT_FROM`, validated against `ALLOWED_FROM_DOMAIN`), and static
+  `POSTERN_API_TOKEN` / `_READ` remain **estate-wide** on purpose.
+- Minting per-member tokens + setting the registry var + MCP/client wiring are the
+  operator half of the multi-person rollout; the worker enforces the contract.
 
 ## 9. Provenance
 
@@ -203,6 +227,8 @@ remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
 |---|---|
 | Resolver + registry | `inbound/src/sendidentity.ts`, `inbound/src/api.ts` (`resolveToken`) |
 | From-binding | `inbound/src/mailbox.ts` (`resolveFrom`, `send`, `reply`) |
+| Read viewer binding (#544) | `inbound/src/api.ts` (list/search/get + related) |
 | Env mirror | `inbound/src/env.d.ts` (`POSTERN_SEND_IDENTITIES`) |
-| Tests | `inbound/per-identity-send.test.ts`, `inbound/scopes.test.ts` |
+| Tests | `inbound/per-identity-send.test.ts`, `inbound/viewer-binding.test.ts`, `inbound/scopes.test.ts` |
 | Scope table | `docs/AUTH-CONTRACT.md` section 7 |
+| MCP env + tools | `mcp/README.md` |

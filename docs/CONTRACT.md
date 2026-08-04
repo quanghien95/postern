@@ -448,6 +448,8 @@ none touches D1 directly (#25, #26).
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
+| POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
+| POST | `/api/admin/reconcile` | read-only orphan-vector audit (admin; spans the estate) | #134 |
 
 **The table above has a machine-readable twin: `contracts/api-routes.json`** (#417), plus its
 parameter sibling `contracts/api-params.json` (the query names and body keys each route reads, keyed
