@@ -158,13 +158,14 @@ jobs:
           cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
 
-          # Inbound-only stub: POSTERN_INGEST_URL + token activates intake on
-          # SMTP_LISTEN (default would be loopback-only inside the container).
-          docker run -d --name "$name" \
+          # Inbound-only stub: POSTERN_INGEST_URL + token activates intake.
+          # Intake must bind loopback only (relay F4 invariant -- a public bind is
+          # an open injection door). Use --network host so the runner can reach
+          # 127.0.0.1:2525 inside the container namespace.
+          docker run -d --name "$name" --network host \
             -e POSTERN_INGEST_URL=http://127.0.0.1:9/ingest \
             -e POSTERN_TRANSPORT_TOKEN=smoke \
-            -e SMTP_LISTEN=0.0.0.0:2525 \
-            -p 127.0.0.1:2525:2525 \
+            -e SMTP_LISTEN=127.0.0.1:2525 \
             "$image"
 
           greeting=""
