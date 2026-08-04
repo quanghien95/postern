@@ -91,6 +91,10 @@ in the existing attachment R2 bucket. Core enforces the same limits as send:
 20 parts and 25 MiB decoded total. Upload reads are streaming-capped even when
 Content-Length is absent.
 
+The webmail UI serializes uploads and waits for every in-flight upload before
+Send. A quick Send after picking a file must not race the POST; otherwise the
+server loads zero staged parts and the mail leaves without attachments.
+
 `POST /api/drafts/{id}/send` loads staged bytes, converts them to the established
 `SendAttachment` shape, and calls the one send core. Staged bytes and the draft
 are deleted only after dispatch and Sent-copy storage succeed. Validation,
