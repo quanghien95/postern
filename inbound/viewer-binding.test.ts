@@ -1,23 +1,9 @@
-// #417: the three viewer-binding call sites, made explicit and pinned.
+// #417 / #544: viewer-binding call sites, made explicit and pinned.
 //
-// The evaluation sweep flagged a latent lens inconsistency: /api/folders bound a
-// viewer from ANY resolution.identity, while /api/messages and /api/search bound one
-// only under a session, and all three said it in a different expression. They are now
-// two NAMED helpers (sessionViewer / boundViewer) with one call site each, which is
-// the refactor half.
-//
-// This file is the interesting half. The difference between the two policies is
-// reachable only by a resolution that HAS a bound identity and is NOT a session, which
-// today means exactly one thing: a per-identity send-registry token. That token
-// resolves to `send` scope, and all three of these routes require `read`, so it is
-// refused at the gate before any viewer policy runs. In other words the inconsistency
-// is currently UNREACHABLE, which is why unifying the spellings changes nothing and
-// why the remaining question (which policy should win if an identity-bound READ
-// credential is ever minted) is a semantics decision, not a refactor.
-//
-// Pinned here so that stops being folklore: if a future change lets an identity-bound
-// token reach these routes, these tests fail and the decision gets made deliberately
-// instead of being discovered in production.
+// #417 unified spellings (sessionViewer / boundViewer). #544 decided the open
+// semantics: a registry token with scopes including "read" reaches list/search and
+// is forced to its bound identity (same as a session). Send-only registry tokens
+// stay 403 on read routes (estate operator tokens remain estate-wide).
 
 import { describe, expect, it } from "vitest";
 import { handleApi } from "./src/api";
@@ -65,8 +51,8 @@ async function session(env: Env, raw: import("node:sqlite").DatabaseSync): Promi
   return `${SESSION_COOKIE}=${minted.rawId}; ${CSRF_COOKIE}=${minted.csrfToken}`;
 }
 
-describe("#417 the two viewer policies cannot differ today", () => {
-  it("a per-identity token is refused on every route that binds a viewer", async () => {
+describe("#544 send-only registry tokens stay out of read routes", () => {
+  it("a send-only per-identity token is refused on every read route that needs read scope", async () => {
     const { env, ctx } = await identityEnv();
     await seed(env, ctx);
     for (const path of READ_ROUTES) {
@@ -77,13 +63,9 @@ describe("#417 the two viewer policies cannot differ today", () => {
   });
 
   it("CONTROL: that same token IS a valid credential, it is only out of scope here", async () => {
-    // Without this the 403s above could just mean "unknown token", which would make
-    // the unreachability claim vacuous.
     const { env, ctx } = await identityEnv();
     const unknown = await handleApi(bearer("/api/messages", "not-a-real-token"), env, ctx);
     expect(unknown.status).toBe(401);
-    // The registry token authenticates: it reaches its OWN route (send) and is
-    // rejected there on the request body, not on the credential.
     const send = await handleApi(
       new Request("https://postern.example/api/send", {
         method: "POST",
@@ -95,6 +77,52 @@ describe("#417 the two viewer policies cannot differ today", () => {
     );
     expect(send.status).not.toBe(401);
     expect(send.status).not.toBe(403);
+  });
+});
+
+describe("#544 identity-bound read credentials force the viewer", () => {
+  async function readIdentityEnv() {
+    const hash = await sha256Hex(IDENTITY_TOKEN);
+    return realEnv({
+      WEBMAIL_AUTH_BACKEND: "native",
+      POSTERN_SEND_IDENTITIES: JSON.stringify({
+        [hash]: { from: IDENTITY, scopes: ["read"] },
+      }),
+    });
+  }
+
+  it("list and search return only the bound identity's mail (not the estate)", async () => {
+    const { env, ctx } = await readIdentityEnv();
+    await seed(env, ctx);
+
+    const list = (await (await handleApi(bearer("/api/messages", IDENTITY_TOKEN), env, ctx)).json()) as {
+      ok: boolean;
+      items: Array<{ messageId: string }>;
+    };
+    expect(list.ok).toBe(true);
+    expect(list.items.map((m) => m.messageId)).toEqual(["mine@x"]);
+
+    const search = (await (
+      await handleApi(bearer("/api/search?q=probe", IDENTITY_TOKEN), env, ctx)
+    ).json()) as { ok: boolean; items: Array<{ message: { messageId: string } }> };
+    expect(search.ok).toBe(true);
+    expect(search.items.map((h) => h.message.messageId)).toEqual(["mine@x"]);
+  });
+
+  it("get of another identity's message is not found (not a silent estate read)", async () => {
+    const { env, ctx } = await readIdentityEnv();
+    await seed(env, ctx);
+    const res = await handleApi(bearer("/api/messages/theirs@x", IDENTITY_TOKEN), env, ctx);
+    expect(res.status).toBe(404);
+  });
+
+  it("CONTROL: estate POSTERN_API_TOKEN still sees both messages", async () => {
+    const { env, ctx } = await readIdentityEnv();
+    await seed(env, ctx);
+    const all = (await (await handleApi(bearer("/api/messages", "test-token"), env, ctx)).json()) as {
+      items: Array<{ messageId: string }>;
+    };
+    expect(all.items.map((m) => m.messageId).sort()).toEqual(["mine@x", "theirs@x"]);
   });
 });
 

@@ -46,17 +46,22 @@ static tokens are unaffected), so do both steps back to back.
 
 ## 3. JSON shape
 
-A single JSON **object** mapping the lowercase **sha256 hex** of a send token to its
-bound identity:
+A single JSON **object** mapping the lowercase **sha256 hex** of a token to its bound
+identity (and which functions that token may use):
 
 ```json
 {
   "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08": {
     "from": "rollins@skyphusion.org",
-    "displayName": "Rollins"
+    "displayName": "Rollins",
+    "scopes": ["read", "send"]
   },
   "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae": {
     "from": "strummer@skyphusion.org"
+  },
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "from": "ada@skyphusion.org",
+    "scopes": ["read"]
   }
 }
 ```
@@ -64,29 +69,44 @@ bound identity:
 | Field | Type | Rule |
 |---|---|---|
 | key | string | lowercase sha256 hex of the raw Bearer token (exactly 64 hex chars) |
-| `from` | string | the AUTHORITATIVE sender address. MUST be a valid address on `ALLOWED_FROM_DOMAIN` (default `skyphusion.org`), enforced at resolve time (section 4). |
-| `displayName` | string? | optional. Becomes the From display name (`Name <addr>`). |
+| `from` | string | the AUTHORITATIVE address. MUST be a valid address on `ALLOWED_FROM_DOMAIN` (default `skyphusion.org`), enforced at resolve time (section 4). |
+| `displayName` | string? | optional. Becomes the From display name (`Name <addr>`) on send. |
+| `scopes` | string[]? | optional (#544). Each entry is `"read"` and/or `"send"`. **Omitted or empty defaults to `["send"]`** so every pre-#544 entry stays send-only. Never grants delete/admin (those stay on static `POSTERN_API_TOKEN` / `both`). |
 
 (The hashes shown above are illustrative, not real tokens.)
 
-## 4. Resolution and From-binding (the runtime contract)
+**MCP / multi-person use (#544).** Give each person a registry token with at least
+`"scopes": ["read"]` (or `["read","send"]`). Put that token in the MCP client's
+`POSTERN_API_TOKEN`. The worker forces list/search/get to that identity; optional
+`to=` filters cannot widen past it. An estate `POSTERN_API_TOKEN` / `_READ` remains
+estate-wide on purpose -- do not share it for multi-person MCP.
+
+## 4. Resolution and identity-binding (the runtime contract)
 
 On every `/api` request the worker resolves the presented `Authorization: Bearer <token>`
 in two ordered stages (`inbound/src/api.ts` -> `resolveToken`, `inbound/src/sendidentity.ts`):
 
 1. **Static scope tokens first**, constant-time compared: `POSTERN_API_TOKEN`
-   (`both`), `POSTERN_API_TOKEN_READ` (`read`), `POSTERN_API_TOKEN_SEND` (`send`). A
-   static match wins and carries **no** bound identity (back-compat From rules apply).
+   (`both`), `POSTERN_API_TOKEN_READ` (`read`), `POSTERN_API_TOKEN_SEND` (`send`), etc.
+   A static match wins and carries **no** bound identity (back-compat; **estate-wide**
+   for read when the scope allows it).
 2. **Only if no static token matched**, the registry: the worker computes
-   `sha256hex(token)` and looks it up in `POSTERN_SEND_IDENTITIES`. A hit grants
-   `send` scope **plus** the bound identity. A miss is an unknown token -> `401`.
+   `sha256hex(token)` and looks it up in `POSTERN_SEND_IDENTITIES`. A hit grants the
+   entry's **caps** (`read` and/or `send`) **plus** the bound identity. A miss is an
+   unknown token -> `401`.
 
 When a request to `POST /api/send` or `POST /api/reply` is authorized by a registry
-token, the worker **overrides** the outbound `From` to the bound identity, discarding
-any caller-supplied `from`. A token cannot send as anyone else. The bound address then
-flows through the SAME validation as any From (shape, `ALLOWED_FROM_DOMAIN`, CRLF
-safety), so a misconfigured registry From fails **loud** (`403 E_SENDER_NOT_ALLOWED`,
-nothing sent), never a silent send from a bad address.
+token with the `send` cap, the worker **overrides** the outbound `From` to the bound
+identity, discarding any caller-supplied `from`. A token cannot send as anyone else.
+
+When a **read** is authorized by a registry token with the `read` cap (#544), the worker
+forces the viewer to the bound identity (and that identity's role queues), the same way
+a webmail session does. A caller cannot pass `to=` another address to widen the store.
+Static estate tokens are unchanged: they may still pass `to=` as a filter.
+
+The bound address then flows through the SAME validation as any From (shape,
+`ALLOWED_FROM_DOMAIN`, CRLF safety), so a misconfigured registry From fails **loud**
+(`403 E_SENDER_NOT_ALLOWED`, nothing sent), never a silent send from a bad address.
 
 **Domain policy is authoritative over the registry.** When the worker parses the
 registry it ALSO enforces `ALLOWED_FROM_DOMAIN`: an entry whose `from` is outside the
@@ -102,15 +122,17 @@ store-back are all unchanged: only the `From` is now authoritatively bound.
 ```mermaid
 flowchart TD
   A[Bearer token] --> B{matches a static<br/>both/read/send secret?}
-  B -- yes --> C[scope = that scope<br/>no bound identity]
+  B -- yes --> C[scope = that scope<br/>no bound identity<br/>read = estate-wide]
   B -- no --> D[hash = sha256hex token]
   D --> E{hash in<br/>POSTERN_SEND_IDENTITIES?}
-  E -- yes --> F[scope = send<br/>identity = registry entry]
+  E -- yes --> F[caps = entry.scopes<br/>default send<br/>identity = registry entry]
   E -- no --> G[401 unknown token]
-  F --> H[/api/send or /api/reply:<br/>From := identity.from AUTHORITATIVE/]
-  H --> I{from on<br/>ALLOWED_FROM_DOMAIN?}
-  I -- yes --> J[send + DKIM + thread + store]
-  I -- no --> K[403 E_SENDER_NOT_ALLOWED<br/>nothing sent]
+  F --> H{request needs send?}
+  H -- yes --> I[/api/send or /api/reply:<br/>From := identity.from AUTHORITATIVE/]
+  H -- read --> R[list/search/get:<br/>viewer := identity.from + roles]
+  I --> J{from on<br/>ALLOWED_FROM_DOMAIN?}
+  J -- yes --> K[send + DKIM + thread + store]
+  J -- no --> L[403 E_SENDER_NOT_ALLOWED<br/>nothing sent]
 ```
 
 ## 5. Why hashes, not raw tokens

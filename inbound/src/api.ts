@@ -209,21 +209,18 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         }
         forRecipient = body.for.trim().toLowerCase();
       }
-      // Viewer binding under SESSION auth (#410). This route was the one of its
-      // family of three that trusted `for` verbatim: its siblings (flags, move) and
-      // the single-message GET/DELETE/attachment routes all bind the session viewer.
-      // Under a session the viewer is the BOUND identity, never a caller-supplied
-      // address, so a webmail user can neither write another account read-state
-      // override (`for: someone-else@`) nor flip ROW-LEVEL messages.seen estate-wide
-      // by omitting `for`. A mismatched explicit `for` is refused rather than
-      // silently rewritten, so a confused client learns it is confused.
+      // Viewer binding under bound-identity auth (#410 / #544). Under a session or a
+      // registry token with the `read` cap, the viewer is the BOUND identity, never a
+      // caller-supplied address: cannot write another account read-state override
+      // (`for: someone-else@`) nor flip ROW-LEVEL messages.seen estate-wide by omitting
+      // `for`. A mismatched explicit `for` is refused rather than silently rewritten.
       //
-      // BEARER-TOKEN CALLERS ARE UNTOUCHED, deliberately: the IMAP door passes `for`
-      // with a token and is legitimately estate-scoped (#350/#357). Nothing in this
-      // block runs unless resolution.viaSession.
+      // Static estate Bearer tokens (POSTERN_API_TOKEN / _READ / IMAP door) are
+      // UNTOUCHED: they stay estate-scoped and may pass `for` (#350/#357).
       let viewer: string | readonly string[] | undefined;
-      if (resolution.viaSession && resolution.identity) {
-        const bound = resolution.identity.from.trim().toLowerCase();
+      const boundMember = boundReadMember(resolution);
+      if (boundMember) {
+        const bound = boundMember.trim().toLowerCase();
         if (forRecipient && forRecipient !== bound) {
           return json(
             { ok: false, error: "E_FORBIDDEN", message: "for must match the session identity" },
@@ -736,8 +733,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   }
 }
 
-/** Every address a bound session may READ under (#425): its own identity, plus each
- *  role queue that identity is a member of.
+/** Every address a bound reader may READ under (#425 / #544): its own identity, plus
+ *  each role queue that identity is a member of.
+ *
+ *  Applies to webmail sessions AND registry tokens with the `read` cap (#544). Static
+ *  estate tokens (POSTERN_API_TOKEN / _READ) have no identity and return undefined --
+ *  they stay estate-scoped by design (explicit operator capability).
  *
  *  Read paths only. The write paths (delete, flags, move) keep passing the single
  *  identity on purpose: the #404 ruling makes a role view read plus \Seen ONLY, so a
@@ -745,9 +746,20 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
  *  handed to one of those routes is simply not accessible, so it is skipped exactly as
  *  an unknown id is, which is the same answer the IMAP door gives with a tagged NO. */
 function sessionReadScope(env: Env, resolution: AuthResolution): string[] | undefined {
-  if (!resolution.viaSession || !resolution.identity) return undefined;
-  const identity = resolution.identity.from;
+  const identity = boundReadMember(resolution);
+  if (!identity) return undefined;
   return [identity, ...rolesForViewer(env, identity)];
+}
+
+/** The single mail address a resolution is bound to for READ, or undefined.
+ *
+ *  Sessions always bind. Registry tokens bind only when they carry the `read` cap
+ *  (#544). Send-only registry tokens stay send-only (403 on list/search). */
+function boundReadMember(resolution: AuthResolution): string | undefined {
+  if (!resolution.identity) return undefined;
+  if (resolution.viaSession) return resolution.identity.from;
+  if (resolution.caps?.includes("read")) return resolution.identity.from;
+  return undefined;
 }
 
 /** The ROLE queue a bound session is asking to read, or null (#425).
@@ -1446,32 +1458,23 @@ async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolu
   };
 }
 
-/** WHOSE mail a read is bound to, when only a SESSION counts (#417).
+/** WHOSE mail a read is bound to for list/search (#417 / #544).
  *
- *  A webmail session is one human in a browser, so the account boundary is theirs and
- *  a caller-supplied `to=` is a filter INSIDE it (#422). A Bearer token, even one bound
- *  to a send identity, is NOT treated as a viewer here: token callers (the IMAP door,
- *  operators, agents) read the estate and say who they mean with `to=`. Used by
- *  /api/messages and /api/search, which had two spellings of this same expression.
+ *  Sessions and registry tokens with the `read` cap force the viewer to the bound
+ *  identity (plus role queues via sessionReadScope / roleReadScope). Static estate
+ *  tokens have no bound member -- callers pass `to=` when they want a filter.
+ *
+ *  Named sessionViewer for call-site continuity; implementation is boundReadMember.
  */
 function sessionViewer(resolution: AuthResolution): string | undefined {
-  return resolution.viaSession ? resolution.identity?.from : undefined;
+  return boundReadMember(resolution);
 }
 
-/** WHOSE mail a read is bound to, counting ANY bound identity (#417).
+/** WHOSE mail folders/unread bind to (#417 / #544).
  *
- *  Wider than sessionViewer by exactly one case: a per-identity send token resolves to
- *  its own identity here. /api/folders uses this, so its unread counts are scoped to a
- *  per-identity token automatically, while the same token reading /api/messages gets
- *  the estate unless it passes `to=`. That difference is REAL and it is behavior that
- *  shipped; it is named and tested here rather than left implicit in three different
- *  expressions (the latent-lens-inconsistency finding on #417). It is also currently
- *  UNREACHABLE, which viewer-binding.test.ts proves rather than assumes: the only
- *  resolution that is identity-bound without being a session is a per-identity
- *  registry token, which carries `send` scope and is refused by all three of these
- *  read routes. Whether folders should narrow to sessionViewer, or list/search widen
- *  to this, is therefore a semantics decision with no live consequence yet, and
- *  nothing is changed while it is open.
+ *  Any bound identity (session or registry). A send-only registry token still has a
+ *  from= for folders convenience if it ever reached the route; with #544, read-capable
+ *  registry tokens reach list/search/folders under the same identity.
  */
 function boundViewer(resolution: AuthResolution): string | undefined {
   return resolution.identity?.from;
@@ -1525,9 +1528,10 @@ function isStateChanging(method: string): boolean {
 //      locking out the primary key. A static match carries NO bound identity
 //      (back-compat: From falls back to req.from / DEFAULT_FROM, validated
 //      against ALLOWED_FROM_DOMAIN).
-//   2. Only if no static token matched, the per-identity send registry (#28): hash
-//      the presented Bearer and look it up. A hit grants `send` scope with an
-//      AUTHORITATIVE bound From; a miss is an unknown token (the caller returns 401).
+//   2. Only if no static token matched, the per-identity registry (#28 / #544): hash
+//      the presented Bearer and look it up. A hit grants the entry's caps (read and/or
+//      send) with an AUTHORITATIVE bound identity; a miss is an unknown token (401).
+//      Caps never include delete/admin -- those stay on static `both`.
 async function resolveToken(request: Request, env: Env): Promise<AuthResolution | null> {
   const auth = request.headers.get("authorization") ?? "";
   const got = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -1557,13 +1561,22 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
   }
   if (matched !== null) return { scope: matched };
 
-  // No static match: consult the per-identity send registry. A hit is a known
-  // per-member token -> send scope with an authoritative bound From; a miss (incl. an
-  // entry whose From is off ALLOWED_FROM_DOMAIN, denied at resolve time) falls through
-  // to null (the caller maps that to 401, unknown token).
+  // No static match: consult the per-identity registry. A hit is a known per-member
+  // token with caps + authoritative identity; a miss (incl. an entry whose From is off
+  // ALLOWED_FROM_DOMAIN, denied at resolve time) falls through to null (401).
   const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
-  const identity = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES, allowedDomain);
-  if (identity) return { scope: "send", identity };
+  const hit = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES, allowedDomain);
+  if (hit) {
+    // Primary scope field is a fallback for any path that still uses scopeSatisfies
+    // without caps; authorize() prefers caps when present.
+    const scope: Scope =
+      hit.caps.includes("read") && hit.caps.includes("send")
+        ? "read" // caps carry both; not static `both` (no delete/admin)
+        : hit.caps.includes("send")
+          ? "send"
+          : "read";
+    return { scope, identity: hit.identity, caps: [...hit.caps] };
+  }
   return null;
 }
 
