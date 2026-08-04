@@ -30,21 +30,27 @@ async function main(): Promise<void> {
 
   const readClient = new PosternClient(apiUrl, token, { timeoutMs });
 
-  const server = new McpServer({ name: "postern-mcp", version: "1.2.0" });
+  const server = new McpServer({ name: "postern-mcp", version: "1.3.0" });
 
-  // Read tools always register (read-scoped POSTERN_API_TOKEN, #85).
+  // Read tools always register. Prefer a per-identity registry token with scopes
+  // including "read" (#544): the worker forces the viewer to that identity. An
+  // estate POSTERN_API_TOKEN / _READ still works and remains estate-wide by design.
   const registered = registerTools(server, readClient, new Set<Scope>(["read"]), READ_TOOLS);
 
-  // Send tools (v1.1) are OPT-IN and MUTATING: they register ONLY when a separate
-  // send-scoped token (POSTERN_SEND_TOKEN) is configured. Absent it, the server is
-  // exactly the v1 read server. The send tools run on their own client so the send
-  // token is used for write routes only and never leaks onto read calls.
-  const sendToken = (process.env.POSTERN_SEND_TOKEN ?? "").trim();
+  // Send tools (v1.1) are OPT-IN and MUTATING. Prefer POSTERN_SEND_TOKEN; if unset,
+  // reuse POSTERN_API_TOKEN when POSTERN_MCP_SEND=1 so a single identity registry
+  // token with scopes ["read","send"] can power both without two env slots.
+  // The send client is separate so the write credential never rides on read calls
+  // unless the operator deliberately configured the same token.
+  let sendToken = (process.env.POSTERN_SEND_TOKEN ?? "").trim();
+  if (!sendToken && (process.env.POSTERN_MCP_SEND ?? "").trim() === "1") {
+    sendToken = token;
+  }
   if (sendToken) {
     const sendClient = new PosternClient(apiUrl, sendToken, { timeoutMs });
     const sent = registerTools(server, sendClient, new Set<Scope>(["send"]), SEND_TOOLS);
     registered.push(...sent);
-    console.error("postern-mcp: send tools ENABLED (POSTERN_SEND_TOKEN present) -- mutating mail capability is live");
+    console.error("postern-mcp: send tools ENABLED -- mutating mail capability is live");
   }
 
   console.error(`postern-mcp: ready (${registered.length} tools: ${registered.join(", ")}) -> ${apiUrl}`);
