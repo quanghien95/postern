@@ -540,15 +540,14 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         _w(part.__bytes__() + b" " + imap4._literal(self._format_headers_utf8(hdrs)))
 
     def spew_bodystructure(self, id, msg, _w=None, _f=None):
-        """BODYSTRUCTURE with Content-Disposition params actually unquoted (#531).
+        """BODYSTRUCTURE with disposition filename and Content-Type name unescaped.
 
         Stock: `_w(b"BODYSTRUCTURE " + collapseNestedLists([getBodyStructure(msg, True)]))`.
-        getBodyStructure's own disposition parser is a documented "XXX Poorly tested
-        parser" that never strips the RFC 2822 quoted-string wrapper it is handed (see
-        rfc822.fix_bodystructure_disposition for the full mechanism), so an attachment's
-        filename parameter reaches the wire with an extra layer of literal quote
-        characters. Twisted's own structure is otherwise correct and untouched; this
-        only corrects the disposition parameter values before they are serialized.
+        Twisted mis-handles RFC 2822 quoted-string parameters on two paths (see
+        rfc822.fix_bodystructure_disposition): disposition never strips the wrapper
+        (#531), and Content-Type unquote() strips the wrapper but not backslash
+        escapes (#534). This corrects both before the structure is serialized;
+        the rest of Twisted's structure is untouched.
         """
         if _w is None:
             _w = self.transport.write

@@ -1,22 +1,19 @@
-"""#531 over the wire: an attachment's BODYSTRUCTURE filename parameter must equal
-the stored filename exactly, not the filename wrapped in an extra layer of RFC 2822
-quoted-string quoting.
+"""#531 / #534 over the wire: BODYSTRUCTURE attachment filename AND Content-Type name
+must equal the stored filename exactly.
 
-WHY THIS IS AN E2E TEST AND NOT A UNIT TEST. Twisted's own Content-Disposition parser
-(_MessageStructure._disposition in twisted.mail.imap4, a documented "XXX Poorly tested
-parser") never strips the quoted-string wrapper it is handed, unlike its Content-Type
-parameter handling (_unquotedAttrs, which DOES call unquote()) -- so before the fix,
-("filename" "repro-4096.bin") went out on the wire as ("filename" "\"repro-4096.bin\"").
-The rendered Content-Disposition HEADER and the Content-Type name= parameter were both
-already correct; only this one BODYSTRUCTURE field was wrong. Only a real socket sees the
-actual serialized parenthesized list Twisted produces (see rfc822.fix_bodystructure_disposition
-and server.py PosternIMAP4Server.spew_bodystructure for the fix itself).
+#531 -- Content-Disposition `filename`: Twisted's _disposition never strips the
+RFC 2822 quoted-string wrapper, so ("filename" "repro-4096.bin") went out as
+("filename" "\"repro-4096.bin\"").
 
-Three shapes, so the fix strips exactly the wrapper rather than mangling the filename: a
-plain filename (the original repro), one containing a space (which genuinely requires RFC
-2822 quoting to render at all), and one containing a literal quote character (which
-requires quoting AND backslash-escaping -- a blanket quote-deleting fix would corrupt
-this case; a byte-exact reversal of rfc822._quote_filename does not).
+#534 -- Content-Type `name`: _unquotedAttrs DOES call unquote(), which strips the
+outer wrapper only. A filename with a literal quote still carries a residual
+backslash on the name parameter (disposition is already correct after #531).
+
+Only a real socket sees the serialized parenthesized list Twisted produces (see
+rfc822.fix_bodystructure_disposition and server.py spew_bodystructure).
+
+Three shapes so the fix reverses quoting/escaping rather than mangling: plain
+filename, one with a space, one with a literal quote (the #534 failing case).
 """
 
 from __future__ import annotations
@@ -82,7 +79,8 @@ class BodyStructureFilenameE2ETest(twisted_unittest.TestCase):
         return port, restore
 
     @defer.inlineCallbacks
-    def _disposition_filename(self, filename):
+    def _attachment_bodystructure_params(self, filename):
+        """Return (disposition_filename, content_type_name) from the wire BODYSTRUCTURE."""
         port, restore = self._spin(filename)
         try:
             raw = yield threads.deferToThread(
@@ -105,40 +103,52 @@ class BodyStructureFilenameE2ETest(twisted_unittest.TestCase):
         parsed = imap4.parseNestedParens(m.group(1)[:-1])
         top = parsed[0]
         attachment_part = top[1]
-        # Basic fields (7) + [md5, disposition, language, location]: disposition
-        # is index 8 -- see rfc822.fix_bodystructure_disposition's docstring for
-        # why this offset is fixed regardless of message shape.
+        # Single-part attachment: basic fields put Content-Type params at index 2
+        # (type, subtype, params, ...). Disposition is index 8 once the 4
+        # extension fields are appended -- see fix_bodystructure_disposition.
+        ct_params = attachment_part[2]
+        self.assertIsInstance(ct_params, list, "no Content-Type params: %r" % (attachment_part,))
+        name_val = None
+        for i in range(0, len(ct_params) - 1, 2):
+            if ct_params[i] == b"name":
+                name_val = ct_params[i + 1].decode()
+                break
+        self.assertIsNotNone(name_val, "no name= in Content-Type params: %r" % (ct_params,))
+
         disposition = attachment_part[8]
         self.assertEqual(
             disposition[0], b"attachment", "not the attachment part: %r" % (attachment_part,)
         )
-        params = disposition[1]
-        self.assertEqual(params[0], b"filename")
-        return params[1].decode()
+        disp_params = disposition[1]
+        self.assertEqual(disp_params[0], b"filename")
+        return disp_params[1].decode(), name_val
 
     @defer.inlineCallbacks
     def test_plain_filename_round_trips_exactly(self):
         # The literal reported repro (#531): a filename with nothing that needs
-        # RFC 2822 quoted-string escaping.
-        got = yield self._disposition_filename("repro-4096.bin")
-        self.assertEqual(got, "repro-4096.bin")
+        # RFC 2822 quoted-string escaping. Both parameters are controls for #534.
+        disp, name = yield self._attachment_bodystructure_params("repro-4096.bin")
+        self.assertEqual(disp, "repro-4096.bin")
+        self.assertEqual(name, "repro-4096.bin")
 
     @defer.inlineCallbacks
     def test_filename_with_a_space_round_trips_exactly(self):
         # A space forces the rendered header into quoted-string form; the fix
         # must strip exactly that wrapper, not merely happen to work when the
         # renderer chooses not to quote.
-        got = yield self._disposition_filename("repro 4096.bin")
-        self.assertEqual(got, "repro 4096.bin")
+        disp, name = yield self._attachment_bodystructure_params("repro 4096.bin")
+        self.assertEqual(disp, "repro 4096.bin")
+        self.assertEqual(name, "repro 4096.bin")
 
     @defer.inlineCallbacks
     def test_filename_with_a_legitimate_quote_character_round_trips_exactly(self):
-        # A literal quote in the filename forces BOTH quoting and backslash
-        # escaping of that quote in the rendered header. A blanket "delete every
-        # quote character" fix would turn this into "repro4096.bin" (wrong); the
-        # correct fix reverses the escaping and leaves the real quote intact.
-        got = yield self._disposition_filename('repro"4096.bin')
-        self.assertEqual(got, 'repro"4096.bin')
+        # A literal quote forces quoting AND backslash-escaping. Disposition
+        # (#531) and Content-Type name (#534) must both reverse that and leave
+        # the real quote intact -- a blanket quote-delete would yield
+        # "repro4096.bin".
+        disp, name = yield self._attachment_bodystructure_params('repro"4096.bin')
+        self.assertEqual(disp, 'repro"4096.bin')
+        self.assertEqual(name, 'repro"4096.bin')
 
 
 if not HAVE_TWISTED:  # pragma: no cover

@@ -123,6 +123,28 @@ class RenderTest(unittest.TestCase):
         struct = getBodyStructure(_RFC822Part(att), True)
         self.assertEqual(struct[2], ["name", "invoice.pdf"])
 
+    def test_bodystructure_name_unescapes_embedded_quote(self):
+        """#534: Content-Type name keeps residual backslash after Twisted unquote()."""
+        from twisted.mail.imap4 import getBodyStructure
+        from posternimap.message import _RFC822Part
+        from posternimap.rfc822 import fix_bodystructure_disposition
+
+        data = b"x" * 16
+        filename = 'repro"4096.bin'
+        m = _msg(
+            attachments=[
+                Attachment(filename=filename, mime="application/octet-stream", size=len(data))
+            ],
+        )
+        parsed = email.message_from_bytes(render_rfc822(m, attachment_bytes=[data]))
+        att = [p for p in parsed.walk() if p.get_content_disposition() == "attachment"][0]
+        raw = getBodyStructure(_RFC822Part(att), True)
+        # Twisted leaves the escape; disposition is still quote-wrapped until our fix.
+        self.assertEqual(raw[2], ["name", 'repro\\"4096.bin'])
+        fixed = fix_bodystructure_disposition(raw)
+        self.assertEqual(fixed[2], ["name", filename])
+        self.assertEqual(fixed[-3][1][1], filename)
+
     def test_header_injection_is_neutralized(self):
         # A subject with CRLF + a fake header must not inject a second header.
         m = _msg(subject="Evil\r\nBcc: victim@example.com")

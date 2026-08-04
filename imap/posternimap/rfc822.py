@@ -280,60 +280,87 @@ def _quote_filename(name: str) -> str:
 
 
 def _unescape_quoted_string(value: str) -> str:
-    """Undo RFC 2822 quoted-string wrapping (#531).
+    """Undo RFC 2822 quoted-string wrapping and residual backslash-escaping.
 
-    The exact reverse of _quote_filename above: strip one matching pair of
-    wrapping double quotes, then undo backslash-escaping (\\" -> ", \\\\ -> \\).
-    A value that was never quoted (a bare token, no tspecials to escape) passes
+    The exact reverse of _quote_filename above:
+
+    1. Strip one matching pair of wrapping double quotes when present
+       (#531 Content-Disposition path: Twisted never strips them).
+    2. Always undo residual backslash-escaping (\\" -> ", \\\\ -> \\)
+       (#534 Content-Type name path: Twisted's unquote() strips the outer
+       wrapper but not the escapes, so a filename with a literal quote
+       still carries a stray backslash).
+
+    A value that was never quoted and has no escapes (a bare token) passes
     through unchanged.
     """
     if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        value = re.sub(r'\\(.)', r'\1', value[1:-1])
-    return value
+        value = value[1:-1]
+    return re.sub(r"\\(.)", r"\1", value)
+
+
+def _fix_bodystructure_param_values(params: list) -> list:
+    """Unescape odd-index parameter values in a flat [name, value, ...] list."""
+    return [
+        _unescape_quoted_string(v) if (i % 2 == 1 and isinstance(v, str)) else v
+        for i, v in enumerate(params)
+    ]
 
 
 def fix_bodystructure_disposition(node):
-    """Recursively unquote Content-Disposition parameter values in a BODYSTRUCTURE
-    tree that twisted.mail.imap4.getBodyStructure(msg, True) produced (#531).
+    """Recursively unquote BODYSTRUCTURE parameter values Twisted mis-parses.
 
-    Twisted's _MessageStructure._disposition() (twisted/mail/imap4.py) is a
-    documented "XXX Poorly tested parser": it splits the raw Content-Disposition
-    header text on "; " and "=" but never strips the RFC 2822 quoted-string
-    wrapper or undoes backslash-escaping, unlike _unquotedAttrs() (used for the
-    Content-Type parameter list right next to it), which DOES call unquote(). So
-    an attachment's filename parameter round-trips with one extra layer of
-    literal quote characters on the wire -- ("filename" "\\"repro-4096.bin\\"")
-    instead of ("filename" "repro-4096.bin") -- even though the Content-Type
-    name= parameter and the rendered Content-Disposition header itself (the
-    thing _quote_filename above builds) are both already correct. This is a
-    Twisted parser limitation, not something in this file to render differently;
-    the fix is a targeted correction of the structure Twisted hands back, at the
-    one caller that writes BODYSTRUCTURE to the wire (server.py spew_bodystructure).
+    Two Twisted paths, both corrected here before the structure hits the wire
+    (server.py spew_bodystructure):
+
+    #531 Content-Disposition `filename`:
+      _MessageStructure._disposition() is a documented "XXX Poorly tested
+      parser": it splits the raw header on "; " and "=" but never strips the
+      RFC 2822 quoted-string wrapper or undoes backslash-escaping. An
+      attachment's filename reaches the wire with an extra layer of literal
+      quote characters -- ("filename" "\\"repro-4096.bin\\"") instead of
+      ("filename" "repro-4096.bin").
+
+    #534 Content-Type `name`:
+      _unquotedAttrs() DOES call unquote(), which strips the outer wrapper
+      only -- it never undoes backslash-escaping. So a filename containing a
+      literal quote still carries a residual backslash on the name parameter
+      while the disposition parameter (after #531) and the rendered headers
+      are already correct.
 
     getBodyStructure(msg, True) threads `extended` down to every subpart
-    uniformly (_MultipartMessageStructure.encode passes the same flag to each
-    child's own encode()), so every node in the tree -- the top-level message
-    and every nested subpart -- ends with the same 4 RFC 3501 extension fields,
-    in this fixed order: [body parameters, body disposition, body language,
-    body location]. node[-3] is therefore always "the disposition entry" for
-    that node, at any depth: either None, a bare (type, None) tuple with no
-    parameters, or [disposition-type, [name, value, name, value, ...]] when
-    parameters (here, always just "filename") are present.
+    uniformly, so every node ends with the same 4 RFC 3501 extension fields
+    in order [md5-or-params, disposition, language, location] for the
+    appropriate body type. node[-3] is always the disposition entry.
 
-    The shape check below (a 2-list whose second element is itself a list) is
-    what keeps this from misfiring elsewhere in a generic recursive walk: no
-    other field in this fixed 4-tuple, and no flat parameter-name/value list
-    (whose own entries are plain strings, never lists), can match it.
+    Content-Type parameters live in different slots by body shape:
+
+    * single-part: basic fields put them at index 2 (type, subtype, params, ...)
+    * multipart: extension data puts them at index -4 (before disposition)
+
+    Shape checks keep the walk from misfiring on nested parts or flat
+    name/value lists that are not themselves structure nodes.
     """
     if isinstance(node, (list, tuple)):
         fixed = [fix_bodystructure_disposition(child) for child in node]
         if len(fixed) >= 4:
             disp = fixed[-3]
             if isinstance(disp, list) and len(disp) == 2 and isinstance(disp[1], list):
-                disp[1] = [
-                    _unescape_quoted_string(v) if (i % 2 == 1 and isinstance(v, str)) else v
-                    for i, v in enumerate(disp[1])
-                ]
+                disp[1] = _fix_bodystructure_param_values(disp[1])
+
+            # Content-Type body parameters (#534).
+            if not isinstance(fixed[0], (list, tuple)):
+                # Single-part: [type, subtype, params, ...]
+                params = fixed[2] if len(fixed) > 2 else None
+                if isinstance(params, list):
+                    fixed[2] = _fix_bodystructure_param_values(params)
+            else:
+                # Multipart: nested parts first; params at extension slot -4.
+                params = fixed[-4]
+                if isinstance(params, list) and (
+                    not params or isinstance(params[0], str)
+                ):
+                    fixed[-4] = _fix_bodystructure_param_values(params)
         return fixed
     return node
 
