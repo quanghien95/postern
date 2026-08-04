@@ -433,6 +433,25 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/SELECT COUNT\(\*\) AS n FROM messages/i.test(sql)) {
           return { n: rows.length } as unknown as T;
         }
+        // #520 projection census: total + at_current + not_current in one aggregate.
+        if (
+          /AS at_current/i.test(sql) &&
+          /AS not_current/i.test(sql) &&
+          /FROM messages/i.test(sql)
+        ) {
+          const ver = Number(bound[0]);
+          let atCurrent = 0;
+          let notCurrent = 0;
+          for (const r of rows) {
+            if (r.projection_version === ver) atCurrent++;
+            else notCurrent++;
+          }
+          return {
+            total: rows.length,
+            at_current: atCurrent,
+            not_current: notCurrent,
+          } as unknown as T;
+        }
         if (/SELECT thread_id FROM messages WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
           const row = rows.find((r) => r.message_id === id);

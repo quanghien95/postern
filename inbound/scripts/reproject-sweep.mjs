@@ -209,6 +209,46 @@ async function main() {
     );
     process.exit(1);
   }
+
+  // #520: authoritative projection-version census (not the paging proxy). Answers
+  // "how many rows are still not at PROJECTION_VERSION right now" with one aggregate
+  // query. After a write run, notCurrent must be 0; after a dry-run it reports what
+  // remains stale without claiming completeness of the walk.
+  try {
+    const census = await reprojectPage({ countOnly: true });
+    if (census.countOnly !== true) {
+      throw new Error(`expected countOnly response, got ${JSON.stringify(census)}`);
+    }
+    const { total, atCurrent, notCurrent, projectionVersion } = census;
+    if (asJson) {
+      console.log(JSON.stringify({ census: { total, atCurrent, notCurrent, projectionVersion } }));
+    } else {
+      console.log(
+        `Census (projection v${projectionVersion}): ${atCurrent}/${total} at current, ` +
+          `${notCurrent} not current.`,
+      );
+    }
+    if (atCurrent + notCurrent !== total) {
+      console.error(
+        `FATAL: census invariant broken (atCurrent ${atCurrent} + notCurrent ${notCurrent} ` +
+          `!== total ${total}).`,
+      );
+      process.exit(1);
+    }
+    if (confirmed && notCurrent > 0) {
+      console.error(
+        `FATAL: write run finished but ${notCurrent} row(s) are still not at projection ` +
+          `v${projectionVersion}. The sweep is not clean.`,
+      );
+      process.exit(1);
+    }
+  } catch (e) {
+    console.error(
+      `WARNING: could not take the #520 projection census (${e.message}). ` +
+        `Walk completeness above still applies; version completeness is unverified.`,
+    );
+  }
+
   if (!confirmed) {
     console.log("\nDry run only. Nothing was written. Re-run with --yes to apply.");
   }

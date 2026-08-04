@@ -208,7 +208,7 @@
       "match": "exact",
       "scope": "admin",
       "auth": "bearer",
-      "note": "#507: refill projected_size after a PROJECTION_VERSION bump; idempotent, and dryRun writes nothing"
+      "note": "#507 refill projected_size after a PROJECTION_VERSION bump (idempotent; dryRun writes nothing); #520 countOnly returns { total, atCurrent, notCurrent } with no paging"
     },
     {
       "id": "admin-roles",
