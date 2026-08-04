@@ -56,6 +56,13 @@ echo "POSTERN_API_TOKEN is ${POSTERN_API_TOKEN:+SET}"
 See [`.env.example`](.env.example). The token is a real credential: keep it out
 of tracked files and shell history.
 
+**Identity-bound tokens (#544).** Prefer a registry token from
+`POSTERN_SEND_IDENTITIES` with `"scopes": ["read"]` (or `["read","send"]`) for
+human/agent use: the worker forces every list/search/get to that identity, and
+send (if allowed) stamps From. An estate `POSTERN_API_TOKEN` / `_READ` remains
+estate-wide -- fine for operators, wrong to share across people. Contract:
+[docs/SEND-IDENTITIES.md](../../docs/SEND-IDENTITIES.md).
+
 ## CLI usage
 
 ```bash

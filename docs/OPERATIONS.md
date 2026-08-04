@@ -19,7 +19,8 @@ Back up the durable state; the derived state you can always rebuild.
 | Full-text search index | D1 virtual table `messages_fts` | Derived | Rebuilt from `messages` by the FTS triggers (see restore) |
 | Vectorize embeddings | Vectorize index | Derived | Rebuilt from D1 via `POST /api/admin/reindex` |
 | Worker config + bindings | `inbound/wrangler.jsonc` (+ the operator `wrangler.ci.json`) | **DURABLE** | Keep it in your own git / secret store |
-| Worker secrets (`POSTERN_API_TOKEN`, send registry) | `wrangler secret` / CF secret store | **DURABLE** | Not exportable; keep your own copy |
+| Worker secrets (`POSTERN_API_TOKEN`, scoped tokens) | `wrangler secret` / CF secret store | **DURABLE** | Not exportable; keep your own copy |
+| Per-identity registry (`POSTERN_SEND_IDENTITIES`) | Worker **var** (hashes only; in deploy config) | **DURABLE** | Readable + mergeable; keep in your git / deploy config (#335) |
 
 The FTS index and the Vectorize embeddings are the only things you never back up:
 both are a function of the message rows, and both are rebuilt on restore.
@@ -176,7 +177,32 @@ npx wrangler tail postern            # use your real deployed script name
 npx wrangler d1 info postern         # database size + state, to watch quota headroom
 ```
 
-## 5. Failure modes worth watching
+## 5. Projection version after a renderer bump
+
+When `PROJECTION_VERSION` in the worker changes, every cached `projected_size` is
+stale until backfilled. The IMAP door ignores a cached size whose stored version
+does not match its renderer, so pre-existing rows become live hydrates until the
+sweep finishes. Full contract: [CONTRACT.md](CONTRACT.md) section 10.3.
+
+```bash
+# Authoritative census: how many rows are still not at the live version (#520).
+# Needs an admin/both token. No writes.
+curl -fsS -X POST https://mail.example.com/api/admin/reproject \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"countOnly":true}'
+# -> { ok, countOnly, total, atCurrent, notCurrent, projectionVersion }
+
+# Dry-run sweep (default), then write:
+cd inbound
+node scripts/reproject-sweep.mjs              # reports would-update
+node scripts/reproject-sweep.mjs --yes        # writes; FATALs if census still notCurrent
+```
+
+Trust `notCurrent` from `countOnly` over the runner's paging start/end totals when
+closing a projection window. A green walk with residual `notCurrent` is not done.
+
+## 6. Failure modes worth watching
 
 - **Email Routing disabled or misrouted.** Inbound delivery just stops; the send
   probe stays green while no new mail arrives. Watch the inbound arrival rate and

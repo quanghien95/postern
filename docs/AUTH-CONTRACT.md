@@ -307,7 +307,7 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import` only; the authenticated door asserts the account identity |
-| `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- hashes only) | `send` + bound From | send/reply and own-draft CRUD as the token's OWN identity |
+| `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read`: list/search/get forced to that identity (cannot widen via `to=`). Never delete/admin. |
 
 The five STATIC slots each hold a **comma-separated SET of tokens** (#154):
 entries are trimmed, empty entries ignored, and a bearer matching ANY member
@@ -325,18 +325,19 @@ Provisioning the scoped secrets is OPTIONAL and non-breaking: with only
 `POSTERN_API_TOKEN` set, every consumer keeps using that one `both` value
 exactly as before.
 
-**Per-identity send registry (#28) -- one scope, many identities.** The scope
-split bounds a leaked token to a FUNCTION; the registry adds WHO. The optional
-worker config var `POSTERN_SEND_IDENTITIES` (a var, not a secret: it stores
-hashes, so it holds no credential and stays readable + mergeable) is a JSON map
-of `sha256hex(token) -> { from, displayName? }`: many send-scoped tokens, each
-the SAME `send` scope but a DISTINCT, authoritative From. The worker hashes the
-presented Bearer, looks it up, and on `/api/send` + `/api/reply` OVERRIDES the
-From to the bound identity (a token cannot send as anyone else). It stores token
-HASHES, never raw tokens. Additive and back-compat: the static
-`POSTERN_API_TOKEN_SEND` keeps working as the un-bound send token. Full
-contract, JSON shape, and the operator registration recipe:
-**`docs/SEND-IDENTITIES.md`**.
+**Per-identity registry (#28 + #544) -- many identities, optional read + send.**
+The scope split bounds a leaked token to a FUNCTION; the registry adds WHO (and,
+with `scopes`, which functions). The optional worker config var
+`POSTERN_SEND_IDENTITIES` (a var, not a secret: it stores hashes, so it holds no
+credential and stays readable + mergeable) is a JSON map of
+`sha256hex(token) -> { from, displayName?, scopes? }`. Omitted `scopes` defaults
+to `["send"]` (pre-#544 entries stay send-only). Entries may declare `"read"`,
+`"send"`, or both. On send routes the worker OVERRIDES From to the bound
+identity. On read routes with the `read` cap it forces the viewer to that
+identity (same binding as a webmail session). Static estate tokens remain
+estate-wide by design -- do not share them for multi-person MCP. Registry tokens
+never receive delete/admin. Full contract, JSON shape, MCP wiring, and the
+operator registration recipe: **`docs/SEND-IDENTITIES.md`**.
 
 **Custody after the split.** Once scoped values are provisioned, keep the `both`
 token OFF every door host: each box EnvironmentFile holds ONLY its scoped value
