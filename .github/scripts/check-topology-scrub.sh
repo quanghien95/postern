@@ -63,15 +63,17 @@ scan() {
     # deliberately out of scope (June scrub left history alone).
     out="$(git -C "$root" grep -nIE -e "$pattern" -- . "${exclude_pathspecs[@]}" 2>/dev/null || true)"
   else
-    # Fixture / non-git mode for the unit suite.
-    out="$(rg -n --no-heading -e "$pattern" \
-      --glob '!.git/**' \
-      --glob '!.github/scripts/check-topology-scrub.sh' \
-      --glob '!.github/scripts/tests/check-topology-scrub.test.sh' \
-      --glob '!.github/scripts/tests/fixtures/topology-scrub/**' \
-      --glob '!package-lock.json' \
-      --glob '!**/*.lock' \
-      "$root" 2>/dev/null || true)"
+    # Fixture / non-git mode for the unit suite. Use plain GNU/BSD grep so the
+    # suite does not depend on ripgrep being installed on the runner (CI
+    # ubuntu-latest has no `rg` by default -- a missing scanner previously made
+    # every positive control silently pass).
+    out="$(grep -RInE \
+      --exclude-dir=.git \
+      --exclude='check-topology-scrub.sh' \
+      --exclude='check-topology-scrub.test.sh' \
+      --exclude='package-lock.json' \
+      --exclude='*.lock' \
+      -e "$pattern" "$root" 2>/dev/null || true)"
   fi
   if [[ -n "$out" ]]; then
     hits+="--- ${label} ---"$'\n'"${out}"$'\n'
