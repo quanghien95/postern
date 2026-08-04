@@ -236,7 +236,9 @@ under the hardened `DynamicUser` unit (already set in `systemd/`).
 
 ## Build, test
 
-Go >= 1.22 (built/tested on 1.26). Dependency-free: `go mod tidy` adds nothing.
+Go >= 1.22 (built/tested on the `toolchain` line in `go.mod`, currently
+1.25.12; the door image is `FROM golang:1.25.12-bookworm` in lockstep -- #541).
+Dependency-free: `go mod tidy` adds nothing.
 
 ```bash
 cd relay
