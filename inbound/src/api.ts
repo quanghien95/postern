@@ -251,11 +251,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           (raw.flagged === undefined && raw.answered === undefined)) {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "set requires boolean flagged and/or answered" }, 400);
       }
+      // Bound reader (session or registry with read cap, #544): only touch own mail.
+      // Static estate tokens omit viewer and keep IMAP/operator estate behavior.
+      const flagViewer = boundReadMember(resolution);
       const updated = await store.setFlags(
         env,
         body.ids as string[],
         { flagged: raw.flagged as boolean | undefined, answered: raw.answered as boolean | undefined },
-        resolution.viaSession ? resolution.identity?.from : undefined,
+        flagViewer,
       );
       return json({ ok: true, updated });
     }
@@ -268,11 +271,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (body.mailbox !== null && body.mailbox !== "archive" && body.mailbox !== "trash" && body.mailbox !== "junk") {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "mailbox must be archive, trash, junk, or null" }, 400);
       }
+      const moveViewer = boundReadMember(resolution);
       const updated = await store.moveMessages(
         env,
         body.ids as string[],
         body.mailbox,
-        resolution.viaSession ? resolution.identity?.from : undefined,
+        moveViewer,
       );
       return json({ ok: true, updated });
     }
@@ -1567,14 +1571,10 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
   const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
   const hit = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES, allowedDomain);
   if (hit) {
-    // Primary scope field is a fallback for any path that still uses scopeSatisfies
-    // without caps; authorize() prefers caps when present.
-    const scope: Scope =
-      hit.caps.includes("read") && hit.caps.includes("send")
-        ? "read" // caps carry both; not static `both` (no delete/admin)
-        : hit.caps.includes("send")
-          ? "send"
-          : "read";
+    // Primary scope is only a fallback when caps is absent; authorize() uses caps.
+    // Prefer send if present so any scope-only path cannot treat a dual-cap token as
+    // read-only (audit note). Never use static `both` here (no delete/admin).
+    const scope: Scope = hit.caps.includes("send") ? "send" : "read";
     return { scope, identity: hit.identity, caps: [...hit.caps] };
   }
   return null;

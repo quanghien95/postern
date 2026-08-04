@@ -124,6 +124,37 @@ describe("#544 identity-bound read credentials force the viewer", () => {
     };
     expect(all.items.map((m) => m.messageId).sort()).toEqual(["mine@x", "theirs@x"]);
   });
+
+  it("flags/move on a registry read token only touch own mail (not estate)", async () => {
+    const { env, ctx } = await readIdentityEnv();
+    await seed(env, ctx);
+    // Flag the other person's message: with bound viewer it must be a no-op (0 updated).
+    const flag = await handleApi(
+      new Request("https://postern.example/api/messages/flags", {
+        method: "POST",
+        headers: { authorization: `Bearer ${IDENTITY_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ ids: ["theirs@x"], set: { flagged: true } }),
+      }),
+      env,
+      ctx,
+    );
+    expect(flag.status).toBe(200);
+    const flagBody = (await flag.json()) as { updated: number };
+    expect(flagBody.updated, "must not flag another identity's mail").toBe(0);
+
+    const move = await handleApi(
+      new Request("https://postern.example/api/messages/move", {
+        method: "POST",
+        headers: { authorization: `Bearer ${IDENTITY_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ ids: ["theirs@x"], mailbox: "trash" }),
+      }),
+      env,
+      ctx,
+    );
+    expect(move.status).toBe(200);
+    const moveBody = (await move.json()) as { updated: number };
+    expect(moveBody.updated, "must not move another identity's mail").toBe(0);
+  });
 });
 
 describe("#417 under a SESSION all three routes bind the same viewer", () => {
