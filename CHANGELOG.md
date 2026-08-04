@@ -11,6 +11,16 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.4.3
+
+PATCH: HEAD parity on `/` and `/health`. No `PROJECTION_VERSION` or
+`POSTERN_IMAP_UIDVALIDITY` bump -- wire format and door projection are unchanged;
+door image rolls from this tag are image refresh only.
+
+- **inbound: HEAD 200 on `/` and `/health` (#566).** Probes that issue `HEAD`
+  (not only `GET`) no longer 404 on the product landing or the health JSON door.
+- **deps:** minor/patch bumps on main since v1.4.2 (Playwright e2e group, golang).
+
 ## v1.4.2
 
 PATCH: public HTML landing at `GET /`. No `PROJECTION_VERSION` or
