@@ -246,14 +246,16 @@
   <div class="card">
     <h2>Connect to your mailbox</h2>
     <p>Paste a read-scoped API token to browse mail. Optionally add a send-scoped token
-       (or per-identity send token) to compose and reply. Tokens stay in this browser
-       tab only (sessionStorage), never sent anywhere but the API you name below.</p>
+       (or a dual-cap identity token with read+send) to compose and reply. A dual-cap
+       token may be pasted once in the read field; send falls back to it when the send
+       field is empty. Tokens stay in this browser tab only (sessionStorage), never sent
+       anywhere but the API you name below.</p>
     <label for="origin">API origin</label>
     <input id="origin" type="url" placeholder="https://postern.example" autocomplete="off" spellcheck="false">
     <label for="token">Postern read token</label>
-    <input id="token" type="password" placeholder="read-scoped API token" autocomplete="off" spellcheck="false">
-    <label for="sendToken">Send token (optional)</label>
-    <input id="sendToken" type="password" placeholder="send-scoped token for compose" autocomplete="off" spellcheck="false">
+    <input id="token" type="password" placeholder="read-scoped or dual-cap identity token" autocomplete="off" spellcheck="false">
+    <label for="sendToken">Send token (optional if dual-cap above)</label>
+    <input id="sendToken" type="password" placeholder="send-scoped token, or leave empty for dual-cap" autocomplete="off" spellcheck="false">
     <div class="row">
       <button id="connect">Connect</button>
     </div>
@@ -351,7 +353,9 @@
   var state = {
     origin: SS.getItem("postern_origin") || "",
     token: SS.getItem("postern_token") || "",
-    sendToken: SS.getItem("postern_send_token") || "",
+    // Dual-cap: a lone read token that also carries send (v1.4.0 identity scopes)
+    // is enough to compose when no separate send token was stored.
+    sendToken: SS.getItem("postern_send_token") || SS.getItem("postern_token") || "",
     searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
     folder: "inbox", q: "", cursor: null, items: [], selected: null,
     folders: [],
@@ -935,12 +939,15 @@
     $("filterBefore").value = state.filters.before || "";
   }
 
-  // BYO-token connect (operator / self-host path, contract 1.7). Unchanged behavior.
+  // BYO-token connect (operator / self-host path, contract 1.7).
+  // Dual-cap identity tokens (read+send on one secret, v1.4.0+): if the send field is
+  // empty, reuse the read token as the send credential. probeSendCapability still gates
+  // compose; a pure read token just keeps sendCapable=false.
   function connect() {
     state.authMode = "token";
     var origin = $("origin").value.trim();
     var token = $("token").value;
-    var sendTok = $("sendToken").value.trim();
+    var sendTok = $("sendToken").value.trim() || token;
     $("gateErr").textContent = "";
     if (!/^https?:\/\//.test(origin)) { $("gateErr").textContent = "Enter the API origin (https://...)."; return; }
     if (!token) { $("gateErr").textContent = "Enter your Postern read token."; return; }
@@ -1533,6 +1540,19 @@
       node.addEventListener("input", scheduleSave);
     });
 
+    // Serialize attachment uploads and make Send wait for them. Without this, a
+    // quick Send after picking a file dispatches before POST /attachments lands,
+    // so the mail goes out with zero staged parts and the late upload 404s.
+    var uploadChain = Promise.resolve();
+    var uploadsPending = 0;
+
+    function setSendEnabled() {
+      var btn = $("cmpSend");
+      if (!btn || closed) return;
+      btn.disabled = uploadsPending > 0;
+      btn.textContent = uploadsPending > 0 ? "Uploading..." : "Send";
+    }
+
     function renderFiles() {
       clear(fileList);
       attachments.forEach(function (a) {
@@ -1552,6 +1572,8 @@
     }
 
     function uploadFile(file) {
+      uploadsPending++;
+      setSendEnabled();
       var progress = el("span", { class: "progress", text: file.name + " 0%" });
       fileList.appendChild(el("li", {}, [progress]));
       return saveDraft().then(function () {
@@ -1580,8 +1602,16 @@
         attachments.push(attachment);
         renderFiles();
       }).catch(function (e) {
-        err.textContent = e.message;
+        err.textContent = "Attachment upload failed: " + e.message;
         renderFiles();
+        throw e;
+      }).then(function () {
+        uploadsPending--;
+        setSendEnabled();
+      }, function (e) {
+        uploadsPending--;
+        setSendEnabled();
+        throw e;
       });
     }
 
@@ -1591,9 +1621,10 @@
       var total = attachments.reduce(function (sum, a) { return sum + (a.size || 0); }, 0);
       files.forEach(function (file) { total += file.size; });
       if (total > 25 * 1024 * 1024) { err.textContent = "Attachments exceed 25 MiB."; return; }
-      files.reduce(function (chain, file) {
+      // Keep a single chain so Send can await every in-flight upload.
+      uploadChain = files.reduce(function (chain, file) {
         return chain.then(function () { return uploadFile(file); });
-      }, Promise.resolve());
+      }, uploadChain.catch(function () {}));
       fileInput.value = "";
     });
 
@@ -1625,7 +1656,13 @@
       var text = (editor.innerText || editor.textContent || "").trim();
       if (!text) { err.textContent = "Enter a message."; return; }
       $("cmpSend").disabled = true;
-      saveDraft().then(function () {
+      // Wait for staged uploads first; otherwise draft send loads zero attachments.
+      uploadChain.catch(function () {}).then(function () {
+        if (uploadsPending > 0) {
+          throw new Error("Attachments are still uploading; wait for them to finish.");
+        }
+        return saveDraft();
+      }).then(function () {
         return apiWrite("/api/drafts/" + encodeURIComponent(draftId) + "/send", {});
       }).then(function (res) {
         state.folder = "sent"; state.q = ""; $("search").value = "";
@@ -1641,6 +1678,7 @@
           return;
         }
         $("cmpSend").disabled = false;
+        setSendEnabled();
         err.textContent = e.message + " Draft preserved for retry.";
       });
     });
