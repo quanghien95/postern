@@ -11,6 +11,33 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.4.0
+
+MINOR: multi-person agent credentials and operator completeness for projection windows.
+No `PROJECTION_VERSION` bump and no `POSTERN_IMAP_UIDVALIDITY` bump for this cut --
+projection wire format is unchanged; door rolls are image refresh only.
+
+- **inbound: identity-bound registry read (#544).** `POSTERN_SEND_IDENTITIES` entries
+  accept optional `scopes: ["read"]` and/or `["send"]` (default `["send"]`). A
+  read-capable registry token forces list/search/get/flags/move to that identity
+  (+ role queues), same policy as a webmail session. Callers cannot widen via
+  `to=`. Static estate `POSTERN_API_TOKEN` / `_READ` stay estate-wide by design.
+  Registry never grants delete/admin. MCP: prefer per-person registry tokens in
+  `POSTERN_API_TOKEN`; dual-cap tokens use `POSTERN_MCP_SEND=1`.
+- **inbound: projection-version census (#520).** `POST /api/admin/reproject` with
+  `{ "countOnly": true }` returns `{ total, atCurrent, notCurrent, projectionVersion }`.
+  `reproject-sweep.mjs` takes the census after every run and FATALs a write run if
+  `notCurrent > 0`.
+- **imap: BODYSTRUCTURE Content-Type `name` unescapes residual backslash escapes
+  (#534)** (sibling of #531 disposition filename).
+- **relay: door image Go pin matches go.mod toolchain (#541)** (`golang:1.25.12-bookworm`).
+- **ci: door image artifact smoke before production roll (#543)** (import/greeting
+  before `dispatch-roll`). Topology scrub gate for fleet hostnames + RFC1918 (#527).
+- **test: retire hand-copied dual-engine size goldens (#537)** in favor of the
+  cross-engine byte harness.
+- **docs:** SEND-IDENTITIES / AUTH-CONTRACT / MCP / OPERATIONS / DEPLOY aligned with
+  the above (PR #557).
+
 ## v1.3.9
 
 PATCH: clear inbound/mcp `npm audit --audit-level=high` gate (undici/postcss overrides; fast-uri/hono overrides) and dependency bumps already on main (e.g. mcp ip-address). Ship with tag-gated Worker deploy after CI is green.
