@@ -11,6 +11,21 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.4.1
+
+PATCH: webmail compose attachment race. No `PROJECTION_VERSION` or
+`POSTERN_IMAP_UIDVALIDITY` bump -- wire format and door projection are unchanged;
+door image rolls from this tag are image refresh only.
+
+- **webmail: wait for attachment uploads before send (#560).** Compose serialized
+  staged-file uploads and awaited the chain before `POST /api/drafts/{id}/send`.
+  A quick Send after picking a file could race the upload POST, so the server
+  dispatched with zero staged parts and the late upload 404'd after the draft
+  was deleted. Send is disabled (label "Uploading...") while uploads are pending.
+- **webmail: dual-cap token UX.** Empty send field falls back to the read token
+  (v1.4.0 identity scopes with read+send on one secret). Pure read tokens still
+  fail the send-capability probe and keep compose off.
+
 ## v1.4.0
 
 MINOR: multi-person agent credentials and operator completeness for projection windows.
