@@ -11,6 +11,10 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.9
+
+PATCH: clear inbound/mcp `npm audit --audit-level=high` gate (undici/postcss overrides; fast-uri/hono overrides) and dependency bumps already on main (e.g. mcp ip-address). Ship with tag-gated Worker deploy after CI is green.
+
 ## v1.3.8
 
 **Incident patch. v1.3.7's door image could not start.** `imap/posternimap/rfc822.py`
