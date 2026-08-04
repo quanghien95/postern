@@ -13,6 +13,9 @@
 // types natively (see scripts/emit-route-table.mjs for the established precedent
 // of importing straight from a .ts source file this same way).
 //
+// #537 retired the hand-copied length goldens in both suites; this script plus
+// the Python cross-engine test are the only place that claims engine agreement.
+//
 // Usage: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/render-golden.mjs '<JSON ProjectInput>'
 
 import { renderRfc822Projection } from "../src/rfc822Project.ts";

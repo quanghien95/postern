@@ -3,16 +3,14 @@ must render the SAME logical message to the SAME bytes.
 
 WHY THIS TEST EXISTS AND WHAT IT IS NOT. #529 was a one-byte Date day-of-month skew
 (the worker emitted "1 Aug", the door emitted "01 Aug") that shipped with both suites
-green, because every existing "shared golden" test (test_rfc822.py
-test_unicode_projection_sizes_match_worker_goldens / inbound/projected-size.test.ts
-"matches Python golden sizes") only ever executes ONE engine and compares its output
-to a hand-copied magic NUMBER in the OTHER language's test file. Both files agreeing
-on a number proves the number was copied correctly; it does not prove the two
-renderers agree with each other, and their existing fixtures all happen to use a
-double-digit day (2026-06-18), so the skew was invisible to them by construction.
+green, because the old "shared golden" tests only ever executed ONE engine and
+compared its output to a hand-copied magic NUMBER in the OTHER language's test
+file. Both files agreeing on a number proves the number was copied correctly; it
+does not prove the two renderers agree with each other. #537 retired those
+hand-copied lengths; this file is the contract.
 
-This test instead RUNS BOTH renderers, on the SAME input, in the SAME test process,
-and asserts the actual output BYTES are identical -- not lengths, not hand-copied
+This test RUNS BOTH renderers, on the SAME input, in the SAME test process, and
+asserts the actual output BYTES are identical -- not lengths, not hand-copied
 numbers. inbound/scripts/render-golden.mjs is the seam: rfc822Project.ts has zero
 imports of its own (no Workers bindings), so a plain `node` subprocess renders it
 with no build step, no npm install, no wrangler, no vitest-pool-workers. See that
@@ -130,6 +128,101 @@ def _shapes(date_iso: str, message_id: str):
     }
 
 
+def _shared_fixture_pairs():
+    """The former hand-copied golden fixture set (#537).
+
+    These used to live as magic LENGTH constants in both suites (Python claimed
+    they matched the worker; TypeScript claimed they matched Python). Neither
+    suite ever ran the other engine. Kept here as the real cross-engine
+    contract: same inputs, byte equality, no transcribed numbers.
+    """
+    date = "2026-06-18T12:00:00Z"
+
+    def py_msg(**over) -> Message:
+        base = dict(
+            message_id="abc123",
+            direction="inbound",
+            thread_id="abc123",
+            from_addr="alice@example.com",
+            to_addr="agent@skyphusion.org",
+            subject="Hello",
+            date=date,
+            in_reply_to=None,
+            body_text="hi",
+            trusted=True,
+            received_at=date,
+            attachments=[],
+        )
+        base.update(over)
+        return Message(**base)
+
+    def ts_input(**over) -> dict:
+        base = {
+            "messageId": "abc123",
+            "from": "alice@example.com",
+            "to": "agent@skyphusion.org",
+            "subject": "Hello",
+            "date": date,
+            "bodyText": "hi",
+        }
+        base.update(over)
+        return base
+
+    return [
+        (
+            "plain-multiline",
+            py_msg(body_text="line one\nline two"),
+            ts_input(bodyText="line one\nline two"),
+        ),
+        (
+            "attachment-ascii",
+            py_msg(
+                body_text="line one",
+                attachments=[Attachment(filename="f.pdf", mime="application/pdf", size=100)],
+            ),
+            ts_input(
+                bodyText="line one",
+                attachments=[{"filename": "f.pdf", "mime": "application/pdf", "size": 100}],
+            ),
+        ),
+        (
+            "u1-unicode-subject",
+            py_msg(message_id="u1", subject="café"),
+            ts_input(messageId="u1", subject="café"),
+        ),
+        (
+            "u2-unicode-from",
+            py_msg(message_id="u2", from_addr="José <jose@example.com>"),
+            ts_input(messageId="u2", **{"from": "José <jose@example.com>"}),
+        ),
+        (
+            "u3-unicode-filename",
+            py_msg(
+                message_id="u3",
+                attachments=[
+                    Attachment(filename="résumé.pdf", mime="application/pdf", size=10)
+                ],
+            ),
+            ts_input(
+                messageId="u3",
+                attachments=[
+                    {"filename": "résumé.pdf", "mime": "application/pdf", "size": 10}
+                ],
+            ),
+        ),
+        (
+            "u4-long-unicode-subject",
+            py_msg(message_id="u4", subject=("Long " * 40) + "café"),
+            ts_input(messageId="u4", subject=("Long " * 40) + "café"),
+        ),
+        (
+            "u5-mixed-subject",
+            py_msg(message_id="u5", subject="Hello café world"),
+            ts_input(messageId="u5", subject="Hello café world"),
+        ),
+    ]
+
+
 @unittest.skipUnless(_NODE, "node not on PATH -- cannot run the TS engine for a cross-engine comparison")
 class ProjectionCrossEngineByteEqualityTest(unittest.TestCase):
     def _assert_byte_identical(self, label: str, py_message: Message, ts_input: dict) -> None:
@@ -167,6 +260,13 @@ class ProjectionCrossEngineByteEqualityTest(unittest.TestCase):
         shapes = _shapes("2026-08-15T12:00:00Z", "double-digit-day")
         for label, (py_message, ts_input) in shapes.items():
             with self.subTest(shape=label):
+                self._assert_byte_identical(label, py_message, ts_input)
+
+    def test_shared_fixture_set_byte_identical(self):
+        # #537: the corpus that used to be hand-copied LENGTH goldens in both
+        # suites. A size constant cannot detect dual-engine drift; bytes can.
+        for label, py_message, ts_input in _shared_fixture_pairs():
+            with self.subTest(fixture=label):
                 self._assert_byte_identical(label, py_message, ts_input)
 
 

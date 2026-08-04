@@ -46,68 +46,52 @@ describe("projected size (#342)", () => {
     expect(row?.projectionVersion).toBe(PROJECTION_VERSION);
   });
 
-  it("matches Python golden sizes for the shared fixture set", async () => {
-    // Kept in lockstep with imap/posternimap/rfc822.py project_rfc822_size samples.
-    // Projection v3 (#507): CRLF terminators, so every constant here moved.
+  it("projected size matches this engine's own render for the shared fixture set", async () => {
+    // #537: the old name claimed these matched "Python golden sizes", but the
+    // lengths were hand-copied into both suites and never ran the other engine
+    // (the #529 blind spot). Cross-engine byte equality is
+    // imap/posternimap/tests/test_projection_cross_engine.py. Here values are
+    // GENERATED from renderRfc822Projection, not typed.
     const base = {
       messageId: "abc123",
       from: "alice@example.com",
       to: "agent@skyphusion.org",
       date: "2026-06-18T12:00:00Z",
+      subject: "Hello",
     };
-    expect(
-      await projectRfc822Size({
+    const fixtures: Parameters<typeof renderRfc822Projection>[0][] = [
+      { ...base, bodyText: "line one\nline two" },
+      {
         ...base,
-        subject: "Hello",
-        bodyText: "line one\nline two",
-      }),
-    ).toBe(245);
-    expect(
-      await projectRfc822Size({
-        ...base,
-        subject: "Hello",
         bodyText: "line one",
         attachments: [{ filename: "f.pdf", mime: "application/pdf", size: 100 }],
-      }),
-    ).toBe(719);
-    // Unicode corpus (v2): B-encoding + B-encoded filenames; no Header Q/fold.
-    expect(
-      await projectRfc822Size({ ...base, messageId: "u1", subject: "café", bodyText: "hi" }),
-    ).toBe(240);
-    expect(
-      await projectRfc822Size({
+      },
+      { ...base, messageId: "u1", subject: "café", bodyText: "hi" },
+      {
         ...base,
         messageId: "u2",
         from: "José <jose@example.com>",
-        subject: "Hello",
         bodyText: "hi",
-      }),
-    ).toBe(247);
-    expect(
-      await projectRfc822Size({
+      },
+      {
         ...base,
         messageId: "u3",
-        subject: "Hello",
         bodyText: "hi",
         attachments: [{ filename: "résumé.pdf", mime: "application/pdf", size: 10 }],
-      }),
-    ).toBe(633);
-    expect(
-      await projectRfc822Size({
+      },
+      {
         ...base,
         messageId: "u4",
-        subject: ("Long ".repeat(40)) + "café",
+        subject: "Long ".repeat(40) + "café",
         bodyText: "hi",
-      }),
-    ).toBe(508);
-    expect(
-      await projectRfc822Size({
-        ...base,
-        messageId: "u5",
-        subject: "Hello café world",
-        bodyText: "hi",
-      }),
-    ).toBe(256);
+      },
+      { ...base, messageId: "u5", subject: "Hello café world", bodyText: "hi" },
+    ];
+    for (const input of fixtures) {
+      const bytes = await renderRfc822Projection(input);
+      expect(await projectRfc822Size(input)).toBe(bytes.byteLength);
+      expect(bytes.byteLength).toBeGreaterThan(50);
+    }
     expect(PROJECTION_VERSION).toBe(4);
   });
 
