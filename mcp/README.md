@@ -16,10 +16,13 @@ flowchart LR
 ```
 
 - **Read tools** (always on): search, list, read a message, read a thread.
-- **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply`, registered
-  **only** when a send-scoped token is configured. With a **per-identity** send token
-  the worker binds the From to that token's own identity. See
-  [Send tools](#send-tools-v11-opt-in) and [Per-identity send](#per-identity-send).
+- **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply`, registered when
+  a send credential is configured (see env below).
+- **Multi-person use (#544):** give each person a **per-identity registry token** with
+  `"scopes": ["read"]` (or `["read","send"]`) and put **that** token in
+  `POSTERN_API_TOKEN`. The worker forces every read to that identity. Do **not** share
+  an estate `POSTERN_API_TOKEN` / `_READ` across people -- that credential is
+  estate-wide by design. See [docs/SEND-IDENTITIES.md](../docs/SEND-IDENTITIES.md).
 
 ## Tools
 
@@ -124,8 +127,9 @@ For production, use `"command": "npx", "args": ["-y", "@skyphusion/postern-mcp"]
 | Env var | Required | Default | Meaning |
 |---|---|---|---|
 | `POSTERN_API_URL` | yes | -- | the Postern mailbox API origin |
-| `POSTERN_API_TOKEN` | yes | -- | a **read-scoped** API token, sent as `Authorization: Bearer` on read tools |
-| `POSTERN_SEND_TOKEN` | no | (unset) | a **send-scoped** API token. When set, the send tools register and use it. With a **per-identity** token the worker binds the From to that token's identity. **Mutating; opt-in.** |
+| `POSTERN_API_TOKEN` | yes | -- | Bearer for **read** tools. Prefer a **per-identity registry** token with `scopes` including `read` (#544). An estate `POSTERN_API_TOKEN` / `_READ` remains estate-wide. |
+| `POSTERN_SEND_TOKEN` | no | (unset) | Bearer for **send** tools. When set, send tools register and use it. With a per-identity token the worker binds From. **Mutating; opt-in.** |
+| `POSTERN_MCP_SEND` | no | (unset) | Set to `1` to register send tools using `POSTERN_API_TOKEN` as the send credential (for a single registry token with `scopes: ["read","send"]`). |
 | `POSTERN_API_TIMEOUT_MS` | no | `15000` | per-request timeout (ms) |
 | `POSTERN_MCP_MAX_ATTACHMENT_BYTES` | no | `5242880` (5 MiB) | max bytes `mailbox_get_attachment` will return; a larger attachment is **refused with a clear error, never truncated**. Raise it (up to the API-side 25 MiB ceiling) for hosts that tolerate bigger tool results. |
 
@@ -139,11 +143,10 @@ Cloudflare, which 403s default bot user-agents ("error 1010"), so this is mandat
 Tool registration is **scope-gated** (`src/tools.ts`): each tool declares the scope it
 needs and `registerTools` registers only those the configured credentials satisfy.
 
-- Without `POSTERN_SEND_TOKEN`, the server is exactly the v1 read server -- the send
-  tools are not registered and an agent cannot see or call them.
-- With `POSTERN_SEND_TOKEN` set, the server additionally registers `mailbox_send` and
-  `mailbox_reply`, on their own client using the send token. The read tools keep using
-  the read token; the send token is never used on read routes.
+- Without `POSTERN_SEND_TOKEN` and without `POSTERN_MCP_SEND=1`, the server is read-only
+  -- send tools are not registered.
+- With `POSTERN_SEND_TOKEN` (or `POSTERN_MCP_SEND=1` reusing `POSTERN_API_TOKEN`), the
+  server registers `mailbox_send` / `mailbox_reply` on a send client.
 
 This mirrors the server-side per-function token split (#85): the worker resolves a
 `send`-scoped token to the `send` scope, which returns `200` on `POST /api/send` and
@@ -153,11 +156,16 @@ leaked, its blast radius is bounded to sending; it cannot read or administer.
 The boot-level gate is proven by `npm run smoke` (`scripts/stdio-smoke.mjs`) and
 unit-covered in `test/send-tools.test.ts`.
 
-## Per-identity send
+## Per-identity credentials (read + send)
 
-A send token can be **bound to a single sender identity**, so an agent sends mail **as
-itself**, never through a shared god-token. This is the backend per-identity send
-registry; the authoritative contract is **[`docs/SEND-IDENTITIES.md`](../docs/SEND-IDENTITIES.md)**.
+Tokens in `POSTERN_SEND_IDENTITIES` bind to one address. Optional `scopes` (#544):
+
+- `"scopes": ["send"]` or omitted -- send-only (historical default).
+- `"scopes": ["read"]` -- MCP/agent **read** credential forced to that mailbox.
+- `"scopes": ["read", "send"]` -- one token for both; set as `POSTERN_API_TOKEN` and
+  `POSTERN_MCP_SEND=1` (or also set `POSTERN_SEND_TOKEN` to the same value).
+
+Authoritative contract: **[`docs/SEND-IDENTITIES.md`](../docs/SEND-IDENTITIES.md)**.
 
 How it works (the MCP client implements none of it; the worker is authoritative):
 

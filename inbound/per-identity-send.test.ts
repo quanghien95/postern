@@ -193,7 +193,22 @@ describe("registry parsing + hashing (units)", () => {
     });
     const map = parseRegistry(raw);
     expect(map.size).toBe(1);
-    expect(map.get(good)).toEqual({ from: "rollins@skyphusion.org", displayName: "Rollins" });
+    expect(map.get(good)).toEqual({
+      identity: { from: "rollins@skyphusion.org", displayName: "Rollins" },
+      caps: ["send"],
+    });
+  });
+
+  it("parseRegistry honors scopes (default send-only; #544 read)", async () => {
+    const readTok = await sha256Hex("read-token");
+    const bothTok = await sha256Hex("both-token");
+    const raw = JSON.stringify({
+      [readTok]: { from: "ada@skyphusion.org", scopes: ["read"] },
+      [bothTok]: { from: "bob@skyphusion.org", scopes: ["read", "send"] },
+    });
+    const map = parseRegistry(raw);
+    expect(map.get(readTok)?.caps).toEqual(["read"]);
+    expect(map.get(bothTok)?.caps).toEqual(["read", "send"]);
   });
 
   it("parseRegistry denies an off-domain From only when an allowed domain is given", async () => {

@@ -1,13 +1,18 @@
-// Per-identity send registry (#28, the layer above the #85 scope resolver). #85
-// resolves a Bearer to a SCOPE (read / send / both); this resolves a send token
-// further to a DISTINCT, AUTHORITATIVE sender identity. MANY send-scoped tokens
-// each carry the SAME send scope but a different bound From, so everyone sends as
-// THEMSELVES through their own per-identity token instead of one shared key.
+// Per-identity credential registry (#28, extended by #544 for read).
+//
+// #85 resolves a Bearer to a SCOPE (read / send / both / ...). This registry maps a
+// token hash to a DISTINCT, AUTHORITATIVE mail identity (and which functions it may
+// use). MANY tokens each bind a different person: everyone acts as THEMSELVES through
+// their own credential instead of one shared estate key.
+//
+// Historically (#28) entries implied send-only. #544 adds optional `scopes` so the
+// same registry can mint read-bound credentials (MCP / agents) whose reads are forced
+// to that identity server-side -- filtering is not optional etiquette.
 //
 // The registry is OPERATOR CONFIG (the POSTERN_SEND_IDENTITIES var in wrangler
 // config, #335; a worker secret before that), not code: an operator adds an identity
 // by editing the var and redeploying. It stores sha256 HASHES of tokens, never the
-// raw tokens, so the registry never holds a plaintext send credential -- which is
+// raw tokens, so the registry never holds a plaintext credential -- which is
 // exactly why it is a readable var and not a write-only secret: there is nothing
 // confidential in it, and a write-only registry cannot be merged, diffed, or
 // recovered (#335). Resolution hashes the presented Bearer and
@@ -20,9 +25,13 @@
  *  `both` to delete-only least privilege. `both` = read + send + delete + admin. */
 export type Scope = "read" | "send" | "delete" | "imap" | "both";
 
+/** Registry-granted functions only. Never delete/admin: those stay on static `both`. */
+export type IdentityCap = "read" | "send";
+
 /**
- * A sender identity bound to a registry token. `from` is AUTHORITATIVE: the worker
- * sets/overrides the outbound From to it, so a token cannot send as anyone else.
+ * A mail identity bound to a registry token. `from` is AUTHORITATIVE for send (the
+ * worker sets/overrides outbound From) and for read (#544: list/search/get are forced
+ * to this address + role queues, never the estate).
  */
 export interface BoundIdentity {
   from: string;
@@ -30,13 +39,24 @@ export interface BoundIdentity {
 }
 
 /**
- * The outcome of resolving a presented Bearer: its scope, plus the bound identity
- * when (and only when) the token came from the per-identity send registry. A static
- * scope token (both/read/send) resolves with no identity (back-compat From rules).
+ * One registry hit: bound identity plus the capability SET used by authorize()
+ * (membership, like webmail sessions). Caps are only "read" and/or "send".
+ */
+export interface RegistryHit {
+  identity: BoundIdentity;
+  caps: IdentityCap[];
+}
+
+/**
+ * The outcome of resolving a presented Bearer: a primary Scope (static tokens) plus
+ * optional bound identity / caps (registry or session). A static scope token
+ * (both/read/send) resolves with no identity (back-compat; estate-wide for read).
  */
 export interface TokenResolution {
   scope: Scope;
   identity?: BoundIdentity;
+  /** When set, authorize() uses membership instead of scopeSatisfies(scope). */
+  caps?: string[];
 }
 
 // Linear, ReDoS-safe address shape check, mirroring mailbox.ts: dot-free labels
@@ -60,13 +80,16 @@ export async function sha256Hex(input: string): Promise<string> {
 }
 
 /**
- * Parse the registry secret into a Map<tokenHash, BoundIdentity>. Defensive by
- * design: a missing, malformed, or partially-bad secret yields an empty (or
- * partial) map rather than throwing, so a broken registry can only DENY (a token
- * that fails to resolve is 401) and never escalates, and the back-compat static
- * tokens keep working regardless. Each entry is validated -- the key must be a
- * 64-char lowercase sha256 hex and `from` a well-formed address; a bad entry is
- * skipped, not fatal.
+ * Parse the registry into a Map<tokenHash, RegistryHit>. Defensive by design: a
+ * missing, malformed, or partially-bad secret yields an empty (or partial) map rather
+ * than throwing, so a broken registry can only DENY (a token that fails to resolve is
+ * 401) and never escalates, and the back-compat static tokens keep working regardless.
+ * Each entry is validated -- the key must be a 64-char lowercase sha256 hex and `from`
+ * a well-formed address; a bad entry is skipped, not fatal.
+ *
+ * `scopes` (optional, #544): array of "read" and/or "send". Omitted or empty defaults
+ * to `["send"]` so every pre-#544 registry entry stays send-only. Unknown strings are
+ * ignored; if nothing valid remains after filtering, the entry is skipped.
  *
  * When `allowedDomain` is given, the domain policy stays AUTHORITATIVE over the
  * registry: the per-identity From is authoritative over the CALLER, but a registry
@@ -77,8 +100,8 @@ export async function sha256Hex(input: string): Promise<string> {
 export function parseRegistry(
   raw: string | undefined,
   allowedDomain?: string,
-): Map<string, BoundIdentity> {
-  const map = new Map<string, BoundIdentity>();
+): Map<string, RegistryHit> {
+  const map = new Map<string, RegistryHit>();
   if (!raw || raw.trim() === "") return map;
 
   let parsed: unknown;
@@ -105,27 +128,41 @@ export function parseRegistry(
       );
       continue;
     }
+    const caps = parseIdentityCaps(v.scopes);
+    if (caps.length === 0) continue;
     const identity: BoundIdentity = { from };
     if (typeof v.displayName === "string" && v.displayName.trim() !== "") {
       identity.displayName = v.displayName.trim();
     }
-    map.set(key, identity);
+    map.set(key, { identity, caps });
   }
   return map;
 }
 
+/** Default scopes=["send"] for back-compat with every pre-#544 registry entry. */
+function parseIdentityCaps(raw: unknown): IdentityCap[] {
+  if (raw === undefined || raw === null) return ["send"];
+  if (!Array.isArray(raw)) return ["send"];
+  const out: IdentityCap[] = [];
+  for (const item of raw) {
+    if (item === "read" || item === "send") {
+      if (!out.includes(item)) out.push(item);
+    }
+  }
+  return out;
+}
+
 /**
- * Resolve a presented Bearer against the send-identity registry: the bound identity
- * for a known registry token, or null if the token is not registered. The caller
- * resolves the static scope tokens FIRST and consults this only when none matched,
- * so a registry hit always means scope `send` with an authoritative From. An entry
- * whose From is outside `allowedDomain` is treated as not present (denied -> 401).
+ * Resolve a presented Bearer against the identity registry: a RegistryHit for a known
+ * token, or null if the token is not registered. The caller resolves the static scope
+ * tokens FIRST and consults this only when none matched. An entry whose From is outside
+ * `allowedDomain` is treated as not present (denied -> 401).
  */
 export async function resolveRegistryIdentity(
   token: string,
   raw: string | undefined,
   allowedDomain?: string,
-): Promise<BoundIdentity | null> {
+): Promise<RegistryHit | null> {
   if (!token) return null;
   const map = parseRegistry(raw, allowedDomain);
   if (map.size === 0) return null;
