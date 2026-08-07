@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { WEBMAIL_HTML, serveWebmail } from "./src/webmail";
 import { handleApi } from "./src/api";
+import { VERSION } from "./src/version";
 import { makeFakeEnv } from "./fakes";
 
 // The worker embeds the page (it cannot read a file at request time), but the
@@ -186,8 +187,8 @@ describe("the inbound worker serves the webmail route", () => {
     const { env } = makeFakeEnv();
     const health = await handleApi(new Request("https://postern.example/health"), env, ctx);
     expect(health.headers.get("content-type")).toContain("application/json");
-    const body = (await health.json()) as { ok: boolean; service: string };
-    expect(body).toEqual({ ok: true, service: "postern" });
+    const body = (await health.json()) as { ok: boolean; service: string; version: string };
+    expect(body).toEqual({ ok: true, service: "postern", version: VERSION });
 
     const root = await handleApi(new Request("https://postern.example/"), env, ctx);
     expect(root.headers.get("content-type")).toMatch(/text\/html/);
