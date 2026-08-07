@@ -33,11 +33,31 @@ door image rolls from this tag are image refresh only.
   artifact, not the pipeline). Single-sourced in `inbound/src/version.ts`,
   guarded by a test against `inbound/package.json` (same pattern as the MCP
   advertised-version fix, mcp/#573).
-- **ci: fixed `codeql.yml`'s `javascript-typescript` leg (#579).** It failed
-  every run in `actions/setup-node` ("Dependencies lock file is not found")
-  because the repo has no root lockfile (they live at `inbound/`, `mcp/`,
-  `webmail/e2e/`). Both matrix legs run `build-mode: none`, so CodeQL never
-  needed `node_modules`; dropped the unneeded setup-node/install steps.
+- **ci: fixed `codeql.yml`'s `javascript-typescript` leg, and widened the
+  matrix to actions/javascript-typescript/go/python (#579).** The
+  `javascript-typescript` leg failed every run in `actions/setup-node`
+  ("Dependencies lock file is not found") because the repo has no root
+  lockfile (they live at `inbound/`, `mcp/`, `webmail/e2e/`); dropped the
+  unneeded setup-node/install steps (both legs ran `build-mode: none`, so
+  neither ever needed `node_modules`). Separately, main's STORED code-scanning
+  results for `go` and `python` had gone stale (last default-setup upload to
+  `refs/heads/main` 2026-08-06) because this workflow's push-to-main trigger
+  displaced default setup's own publication for languages it never declared.
+  Widened the matrix to all four languages the repo actually contains; `go`
+  uses `autobuild` (it does not support `build-mode: none`) with
+  `actions/setup-go` tracking `relay/go.mod`, `python` uses `build-mode: none`
+  like the other two. Verified live: the workflow's own run now produces four
+  `Analyze (...)` legs, all passing.
+- **deps (dev-only): bumped transitive `nanoid` to 3.3.18 in `inbound/` and
+  `mcp/` (GHSA-2v37-7h3g-55p8, #579).** A newly-disclosed high-severity
+  advisory (`nanoid` custom generators can loop indefinitely when size is
+  zero) started failing the required `npm audit --audit-level=high` CI gate
+  on both packages; the same advisory affects `main` unchanged. `nanoid`
+  arrives via `vitest -> vite -> postcss`, a dev-only chain that never reaches
+  the deployed Worker or the published `postern-mcp` package. `npm audit fix`
+  in each package touched only `nanoid`'s lockfile entry; neither
+  `package.json` changed (`mcp/package.json`'s own version stays untouched --
+  this is not the MCP republish).
 
 ## v1.4.3
 
