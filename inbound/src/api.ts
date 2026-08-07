@@ -52,6 +52,7 @@ import { roleMap, rolesForViewer } from "./roles";
 import { readBodyCapped, readBytesCapped, PayloadTooLargeError } from "./body";
 import { handleMobileconfig } from "./mobileconfig";
 import { handleMtaSts } from "./mtasts";
+import { VERSION } from "./version";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -95,7 +96,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         headers: { "content-type": "application/json" },
       });
     }
-    return json({ ok: true, service: "postern" });
+    return json({ ok: true, service: "postern", version: VERSION });
   }
   if ((request.method === "GET" || request.method === "HEAD") && path === "/") {
     if (request.method === "HEAD") {
@@ -111,10 +112,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     return serveDemoLanding(url);
   }
 
-  if ((request.method === "GET" || request.method === "HEAD") && path === "/robots.txt") {
+  // Demo SEO surface (#579): scoped to the posternonline.com zone (apex or any
+  // subdomain), so a self-hoster following DEPLOY.md on their own mail domain
+  // never serves a robots.txt/sitemap.xml advertising OUR demo's URLs. Outside
+  // the zone both routes fall through to the ordinary not_found path below,
+  // restoring exactly what a self-hosted deploy served before this gate.
+  if ((request.method === "GET" || request.method === "HEAD") && path === "/robots.txt" &&
+      isPosternonlineZone(url.hostname)) {
     return serveRobotsTxt(request.method === "HEAD");
   }
-  if ((request.method === "GET" || request.method === "HEAD") && path === "/sitemap.xml") {
+  if ((request.method === "GET" || request.method === "HEAD") && path === "/sitemap.xml" &&
+      isPosternonlineZone(url.hostname)) {
     return serveSitemap(request.method === "HEAD");
   }
 
@@ -1696,6 +1704,19 @@ function errorCode(err: unknown): string {
 /** Public demo host (SEO canonical). Apex/www posternonline.com 301 here. */
 const DEMO_CANONICAL_ORIGIN = "https://demo.posternonline.com";
 
+/** True for any subdomain of the public demo zone (demo., www., or a future
+ *  one). Does NOT match the bare apex; see isPosternonlineZone for that. */
+function isPosternonlineSubdomain(hostname: string): boolean {
+  return hostname.toLowerCase().endsWith(".posternonline.com");
+}
+
+/** True for the whole posternonline.com zone: the apex or any subdomain.
+ *  Single definition of the zone boundary, shared by the SEO route gate. */
+function isPosternonlineZone(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "posternonline.com" || isPosternonlineSubdomain(host);
+}
+
 /** Apex/www of the public demo zone must not compete with the demo host. */
 function redirectApexToDemo(url: URL): Response | null {
   const host = url.hostname.toLowerCase();
@@ -1707,11 +1728,7 @@ function redirectApexToDemo(url: URL): Response | null {
 /** Public root landing for demo/product hosts (SEO + human door). Health stays on /health. */
 function serveDemoLanding(url: URL): Response {
   // Prefer the public demo origin when on that product zone so OG/canonical stay stable.
-  const origin =
-    url.hostname.toLowerCase() === "demo.posternonline.com" ||
-    url.hostname.toLowerCase().endsWith(".posternonline.com")
-      ? DEMO_CANONICAL_ORIGIN
-      : url.origin;
+  const origin = isPosternonlineSubdomain(url.hostname) ? DEMO_CANONICAL_ORIGIN : url.origin;
   const webmail = `${origin}/webmail`;
   const html = `<!doctype html>
 <html lang="en">
@@ -1778,14 +1795,19 @@ Sitemap: ${DEMO_CANONICAL_ORIGIN}/sitemap.xml
   return new Response(body, { status: 200, headers });
 }
 
+// Last content change of the two listed URLs (the landing page and the webmail
+// entry point). A request-time `new Date()` reported "modified today" on every
+// crawl forever, which crawlers discount; bump this only when that content
+// actually changes, never on an unrelated deploy.
+const SITEMAP_LASTMOD = "2026-08-08";
+
 function serveSitemap(headOnly: boolean): Response {
-  const today = new Date().toISOString().slice(0, 10);
   const urls = ["/", "/webmail"];
   const entries = urls
     .map(
       (p) => `  <url>
     <loc>${DEMO_CANONICAL_ORIGIN}${p === "/" ? "/" : p}</loc>
-    <lastmod>${today}</lastmod>
+    <lastmod>${SITEMAP_LASTMOD}</lastmod>
     <changefreq>weekly</changefreq>
     <priority>${p === "/" ? "1.0" : "0.8"}</priority>
   </url>`,

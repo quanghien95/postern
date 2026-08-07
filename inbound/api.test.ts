@@ -44,20 +44,50 @@ describe("handleApi", () => {
     expect(await health.text()).toBe("");
   });
 
-  it("serves robots.txt and sitemap.xml for the public demo", async () => {
+  it("serves robots.txt and sitemap.xml on the posternonline.com demo zone", async () => {
     const { env, ctx } = makeFakeEnv();
-    const robots = await handleApi(req("GET", "/robots.txt"), env, ctx);
+    const robots = await handleApi(
+      new Request("https://demo.posternonline.com/robots.txt", { method: "GET" }),
+      env,
+      ctx,
+    );
     expect(robots.status).toBe(200);
     expect(robots.headers.get("content-type")).toMatch(/text\/plain/);
     const robotsBody = await robots.text();
     expect(robotsBody).toContain("Sitemap: https://demo.posternonline.com/sitemap.xml");
 
-    const sitemap = await handleApi(req("GET", "/sitemap.xml"), env, ctx);
+    const sitemap = await handleApi(
+      new Request("https://demo.posternonline.com/sitemap.xml", { method: "GET" }),
+      env,
+      ctx,
+    );
     expect(sitemap.status).toBe(200);
     expect(sitemap.headers.get("content-type")).toMatch(/xml/);
     const mapBody = await sitemap.text();
     expect(mapBody).toContain("https://demo.posternonline.com/");
     expect(mapBody).toContain("https://demo.posternonline.com/webmail");
+  });
+
+  // #579: both routes hardcode the demo's own canonical URLs, so serving them
+  // on a self-hoster's own mail domain would advertise OUR demo's robots/
+  // sitemap on THEIR host. Host-gated on the posternonline.com zone; every
+  // other host must fall through to the ordinary not_found path, restoring
+  // exactly what production served before the SEO routes existed (verified
+  // live: postern.skyphusion.org/robots.txt was 404 on v1.4.3).
+  it("404s robots.txt and sitemap.xml off the posternonline.com zone (self-hoster host)", async () => {
+    const { env, ctx } = makeFakeEnv();
+    const robots = await handleApi(req("GET", "/robots.txt"), env, ctx);
+    expect(robots.status).toBe(404);
+
+    const sitemap = await handleApi(req("GET", "/sitemap.xml"), env, ctx);
+    expect(sitemap.status).toBe(404);
+
+    const otherDomain = await handleApi(
+      new Request("https://mail.example.com/robots.txt", { method: "GET" }),
+      env,
+      ctx,
+    );
+    expect(otherDomain.status).toBe(404);
   });
 
   it("301s posternonline.com apex to demo.posternonline.com", async () => {
