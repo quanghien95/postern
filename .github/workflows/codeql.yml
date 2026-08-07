@@ -1,7 +1,18 @@
 name: CodeQL
 
-# Estate standard: in-repo CodeQL for JS/TS + Actions. PR trigger unfiltered so
-# stacked PRs still get analysis. Schedule weekly.
+# Estate standard: in-repo CodeQL for every language this repo actually
+# contains. PR trigger unfiltered so stacked PRs still get analysis. Schedule
+# weekly.
+#
+# #579/#580: this workflow (added #577) silently DISPLACED GitHub's default
+# setup, which was analyzing four languages (actions, javascript-typescript,
+# go, python; confirmed from the code-scanning analyses list, analysis_key
+# dynamic/github-code-scanning/codeql:analyze, last seen 2026-08-06) with a
+# two-language matrix (actions, javascript-typescript) where the
+# javascript-typescript leg additionally died in actions/setup-node before it
+# ever uploaded a result. So real coverage collapsed to ONE language (actions)
+# while the check still reported green. The matrix below restores all four,
+# matching what default setup was demonstrably analyzing.
 
 on:
   push:
@@ -32,19 +43,38 @@ jobs:
             build-mode: none
           - language: javascript-typescript
             build-mode: none
+          # Go does not support build-mode: none (compiled language; verified
+          # against GitHub's own build-mode support docs). relay/ is an
+          # ordinary Go module, so autobuild is expected to work without a
+          # manual build step.
+          - language: go
+            build-mode: autobuild
+          - language: python
+            build-mode: none
     steps:
       - uses: actions/checkout@v7
-      # No setup-node / install step: both matrix legs run build-mode: none, so
-      # CodeQL extracts from source only and never needs node_modules. The
-      # javascript-typescript leg used to set `cache: npm`, but this repo has no
-      # ROOT lockfile (they live at inbound/, mcp/, webmail/e2e/), so setup-node
-      # failed every run with "Dependencies lock file is not found" -- dropping
-      # the unneeded steps is simpler and more correct than pointing the cache
-      # at one of three lockfiles the analysis does not read anyway.
+      # setup-node / install: javascript-typescript only, and only because it
+      # used to be required for `cache: npm` -- build-mode: none means CodeQL
+      # never needs node_modules for THIS language either, so there is no
+      # install step at all, just nothing to set up for the other three
+      # languages. This repo has no ROOT lockfile (they live at inbound/,
+      # mcp/, webmail/e2e/), which is what made `cache: npm` fail every run
+      # with "Dependencies lock file is not found" before this fix.
+      #
+      # setup-go: go only. autobuild needs a real Go toolchain on PATH; track
+      # relay/go.mod the same way ci.yml's own relay job does, so CodeQL never
+      # drifts from the toolchain the code actually builds with.
+      - uses: actions/setup-go@v7
+        if: matrix.language == 'go'
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+      - uses: github/codeql-action/autobuild@v4
+        if: matrix.build-mode == 'autobuild'
       - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
